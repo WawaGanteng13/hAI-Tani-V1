@@ -1,0 +1,8 @@
+{
+  "name": "Remix TaniAI - WhatsApp \u0026 Google Sheets Agent",
+  "description": "Dashboard profesional pertanian terhubung ke Google Sheets dengan visualisasi interaktif demografi petani, penggunaan lahan, distribusi komoditas, estimasi panen, dan tren harga pasar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
