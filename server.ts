@@ -1079,11 +1079,11 @@ function isAddRegex(lower: string): boolean {
 // Laya intent sidecar (stdlib http, opt-in via LAYA_URL). Timeout 1.2s, cooldown 30s saat down.
 // Lazy: hanya fetch saat regex belum yakin + cache 10 mnt. Regex hit -> 0ms overhead.
 // ponytail: ganti ke laya[serve] batch saat butuh throughput.
-const LAYA_URL = (process.env.LAYA_URL?.trim() || "http://127.0.0.1:8787").replace(/\/+$/, "");
+const LAYA_URL = (process.env.LAYA_URL?.trim() || "").replace(/\/+$/, "");
 let layaUnavailableUntil = 0;
 const layaCache = new Map<string, { v: { intent: string; confidence: number }; exp: number }>();
 async function getLayaIntent(message: string): Promise<{ intent: string; confidence: number } | null> {
-  if (!message || Date.now() < layaUnavailableUntil) return null;
+  if (!message || !LAYA_URL || Date.now() < layaUnavailableUntil) return null;
   const key = message.slice(0, 200).toLowerCase();
   const hit = layaCache.get(key);
   if (hit) { if (Date.now() < hit.exp) return hit.v; layaCache.delete(key); }
