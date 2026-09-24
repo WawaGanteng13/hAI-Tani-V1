@@ -128,9 +128,9 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
   };
 
   return (
-    <div className="max-w-7xl mx-auto py-4 space-y-5">
+    <div className="app-shell space-y-5 animate-fade-in">
       {/* Top Banner & Actions */}
-      <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div className="card p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <div className="flex items-center space-x-2">
             <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">

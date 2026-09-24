@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Cpu,
   Sparkles,
@@ -86,6 +86,12 @@ export const DataScientistPortal: React.FC<DataScientistPortalProps> = ({
     value: Number(ha.toFixed(1)),
   }));
 
+  // Korelasi Pearson luas vs ton (API stdlib).
+  const [corr, setCorr] = useState<{ n: number; r: number } | null>(null);
+  useEffect(() => {
+    fetch('/api/analytics/correlation').then((r) => r.json()).then(setCorr).catch(() => {});
+  }, [farmers.length]);
+
   const handleCopyReport = () => {
     const text = `LAPORAN STRATEGIS DATA SCIENTIST PERTANIAN - TANIAI
 Tanggal: ${recommendation.tanggal}
@@ -120,7 +126,7 @@ ${recommendation.dataScientistNotes}`;
   };
 
   return (
-    <div className="max-w-7xl mx-auto py-4 space-y-6">
+    <div className="app-shell space-y-6 animate-fade-in">
       {/* Top Banner */}
       <div className="bg-slate-900 text-white rounded-2xl p-6 border border-slate-800 shadow-xl flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
@@ -156,7 +162,7 @@ ${recommendation.dataScientistNotes}`;
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
+        <div className="card card-hover p-4">
           <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
             <span>Total Petani Terdata</span>
             <span className="p-1 rounded-md bg-emerald-50 text-emerald-700">👤</span>
@@ -167,7 +173,7 @@ ${recommendation.dataScientistNotes}`;
           </div>
         </div>
 
-        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
+        <div className="card card-hover p-4">
           <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
             <span>Total Lahan Pertanian</span>
             <span className="p-1 rounded-md bg-blue-50 text-blue-700">📐</span>
@@ -178,7 +184,7 @@ ${recommendation.dataScientistNotes}`;
           </div>
         </div>
 
-        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
+        <div className="card card-hover p-4">
           <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
             <span>Estimasi Akumulasi Panen</span>
             <span className="p-1 rounded-md bg-amber-50 text-amber-700">🌾</span>
@@ -189,7 +195,7 @@ ${recommendation.dataScientistNotes}`;
           </div>
         </div>
 
-        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
+        <div className="card card-hover p-4">
           <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
             <span>Komoditas Aktif</span>
             <span className="p-1 rounded-md bg-purple-50 text-purple-700">🌱</span>
@@ -204,7 +210,7 @@ ${recommendation.dataScientistNotes}`;
       {/* Visual Analytics Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left: Bar Chart Panen per Komoditas */}
-        <div className="lg:col-span-7 bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
+        <div className="lg:col-span-7 card p-5 space-y-3">
           <div className="flex items-center justify-between pb-2 border-b border-slate-100">
             <div className="flex items-center space-x-2">
               <BarChart3 className="w-4 h-4 text-emerald-600" />
@@ -239,7 +245,7 @@ ${recommendation.dataScientistNotes}`;
         </div>
 
         {/* Right: Pie Chart Sebaran Wilayah */}
-        <div className="lg:col-span-5 bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
+        <div className="lg:col-span-5 card p-5 space-y-3">
           <div className="flex items-center justify-between pb-2 border-b border-slate-100">
             <div className="flex items-center space-x-2">
               <MapPin className="w-4 h-4 text-indigo-600" />
@@ -260,6 +266,11 @@ ${recommendation.dataScientistNotes}`;
                   dataKey="value"
                   label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
                 >
+
+      <div className="card p-3 text-xs text-slate-600 flex items-center justify-between">
+        <span><strong>Korelasi luas-ton (Pearson):</strong> <span className="num font-bold">{corr ? corr.r : '...'}</span> <span className="text-slate-400">n={corr ? corr.n : '...'}</span></span>
+        <span className="text-slate-400">r~1 = tonase ikut luas lahan</span>
+      </div>
                   {chartGeoData.map((_, index) => (
                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                   ))}
@@ -275,7 +286,7 @@ ${recommendation.dataScientistNotes}`;
       </div>
 
       {/* Strategic Report by Gemini AI */}
-      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-md space-y-6">
+      <div className="card p-6 border border-slate-200 shadow-md space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-4 border-b border-slate-200 gap-3">
           <div>
             <div className="flex items-center space-x-2">

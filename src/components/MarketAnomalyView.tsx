@@ -48,6 +48,28 @@ export const MarketAnomalyView: React.FC<MarketAnomalyViewProps> = ({
   const [isUpdating, setIsUpdating] = useState(false);
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [broadcastSuccess, setBroadcastSuccess] = useState<string | null>(null);
+  const [sim, setSim] = useState({ resapanPersen: 20, casHari: 30, subsidiOngkirKg: 0, operasiPasarKg: 0 });
+  const [simResult, setSimResult] = useState<any>(null);
+  const [simLoading, setSimLoading] = useState(false);
+  const [pest, setPest] = useState({ komoditas: 'Padi', hama: 'wereng', anjuran: 'Lapor PPL, pasang perangkap kuning, semprot neem 2ml/L pagi hari.' });
+  const [pestSending, setPestSending] = useState(false);
+
+  const handleSimulate = async () => {
+    setSimLoading(true);
+    try {
+      const cc = commodities.find((c) => c.id === selectedCommodity.id) || commodities[0];
+      const r = await fetch('/api/interventions/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...sim, hargaKg: cc?.hargaSekarang }) });
+      if (r.ok) setSimResult(await r.json());
+    } finally { setSimLoading(false); }
+  };
+  const handlePest = async () => {
+    setPestSending(true);
+    try {
+      const r = await fetch('/api/notifications/pest-broadcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pest) });
+      if (r.ok) setBroadcastSuccess('Broadcast siaga hama terkirim ke petani terkait!');
+      setTimeout(() => setBroadcastSuccess(null), 5000);
+    } finally { setPestSending(false); }
+  };
 
   // Sync selected commodity if commodities update
   const currentCommodity = commodities.find((c) => c.id === selectedCommodity.id) || commodities[0];
@@ -91,9 +113,9 @@ export const MarketAnomalyView: React.FC<MarketAnomalyViewProps> = ({
   );
 
   return (
-    <div className="max-w-7xl mx-auto py-4 space-y-6">
+    <div className="app-shell space-y-6 animate-fade-in">
       {/* Top Banner */}
-      <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div className="card p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <div className="flex items-center space-x-2">
             <div className="w-8 h-8 rounded-lg bg-rose-100 text-rose-700 flex items-center justify-center font-bold">
@@ -199,7 +221,7 @@ export const MarketAnomalyView: React.FC<MarketAnomalyViewProps> = ({
       {/* Main Focus Detail: Price Trend & Broadcast WhatsApp Center */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left: 7-Day Chart & Anomaly Analysis */}
-        <div className="lg:col-span-7 bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-4">
+        <div className="lg:col-span-7 card p-5 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-3 border-b border-slate-100 gap-2">
             <div>
               <div className="flex items-center space-x-2">
@@ -301,7 +323,7 @@ export const MarketAnomalyView: React.FC<MarketAnomalyViewProps> = ({
         </div>
 
         {/* Right: Automated WhatsApp Broadcast Center */}
-        <div className="lg:col-span-5 bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex flex-col justify-between space-y-4">
+        <div className="lg:col-span-5 card p-5 flex flex-col justify-between space-y-4">
           <div>
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center space-x-2">
@@ -374,7 +396,7 @@ _Pesan otomatis dari Sistem Pemantauan TaniAI & Google Sheets._`}
       </div>
 
       {/* History of Sent Notifications */}
-      <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
+      <div className="card p-5">
         <div className="flex items-center space-x-2 pb-3 border-b border-slate-100 mb-4">
           <Clock className="w-4 h-4 text-slate-500" />
           <h3 className="font-bold text-sm text-slate-800">Riwayat Pengiriman Notifikasi Anomali Otomatis</h3>
@@ -402,6 +424,30 @@ _Pesan otomatis dari Sistem Pemantauan TaniAI & Google Sheets._`}
               <div className="flex items-center space-x-4 shrink-0 text-slate-500 text-[11px] self-end sm:self-center">
                 <span>{notif.waktuKirim}</span>
                 <span className="font-semibold text-emerald-700 flex items-center space-x-1">
+      <div className="card p-5">
+        <h3 className="font-bold text-sm text-slate-800 mb-1">Simulasi Intervensi Dinas</h3>
+        <p className="text-xs text-slate-500 mb-3">Resapan gudang, CAS 30-45 hari, subsidi ongkir, operasi pasar murah.</p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+          <label className="label">Resapan %<input className="input num mt-1" type="number" value={sim.resapanPersen} onChange={(e) => setSim({ ...sim, resapanPersen: Number(e.target.value) })} /></label>
+          <label className="label">CAS hari<input className="input num mt-1" type="number" min={0} max={45} value={sim.casHari} onChange={(e) => setSim({ ...sim, casHari: Number(e.target.value) })} /></label>
+          <label className="label">Subsidi Rp/kg<input className="input num mt-1" type="number" value={sim.subsidiOngkirKg} onChange={(e) => setSim({ ...sim, subsidiOngkirKg: Number(e.target.value) })} /></label>
+          <label className="label">OP kg<input className="input num mt-1" type="number" value={sim.operasiPasarKg} onChange={(e) => setSim({ ...sim, operasiPasarKg: Number(e.target.value) })} /></label>
+        </div>
+        <button onClick={handleSimulate} disabled={simLoading} className="mt-3 px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50">{simLoading ? 'Menghitung...' : 'Jalankan Simulasi'}</button>
+        {simResult && <div className="mt-2 text-xs text-slate-700 num">Terserap Rp {simResult.nilaiTerserap.toLocaleString('id-ID')} • CAS Rp {simResult.nilaiCas.toLocaleString('id-ID')} • Subsidi Rp {simResult.biayaSubsidi.toLocaleString('id-ID')} • OP Rp {simResult.nilaiOp.toLocaleString('id-ID')}</div>}
+      </div>
+
+      <div className="card p-5">
+        <h3 className="font-bold text-sm text-slate-800 mb-1">Broadcast Siaga Hama</h3>
+        <p className="text-xs text-slate-500 mb-3">Template khusus, endpoint sendiri, target per komoditas.</p>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+          <label className="label">Komoditas<input className="input mt-1" value={pest.komoditas} onChange={(e) => setPest({ ...pest, komoditas: e.target.value })} /></label>
+          <label className="label">Hama<input className="input mt-1" value={pest.hama} onChange={(e) => setPest({ ...pest, hama: e.target.value })} /></label>
+          <label className="label">Anjuran<input className="input mt-1" value={pest.anjuran} onChange={(e) => setPest({ ...pest, anjuran: e.target.value })} /></label>
+        </div>
+        <button onClick={handlePest} disabled={pestSending} className="mt-3 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50">{pestSending ? 'Mengirim...' : 'Kirim Broadcast Hama'}</button>
+      </div>
+
                   <CheckCircle2 className="w-3.5 h-3.5" />
                   <span>{notif.status} ({notif.jumlahPetaniTerdampak} petani)</span>
                 </span>

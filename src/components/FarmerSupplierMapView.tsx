@@ -111,7 +111,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
   const resolvedApiKey =
     propKey ||
     ((import.meta as any).env?.VITE_GOOGLE_MAPS_API_KEY as string) ||
-    'AIzaSyCfYtODZ0FDfGAjckKotHepIOKryfsr_ZQ';
+    "";
 
   // Selection states
   const [selectedFarmer, setSelectedFarmer] = useState<FarmerRecord | null>(null);
@@ -328,7 +328,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
     <div className="flex flex-col h-[calc(100vh-64px)] w-full overflow-hidden bg-slate-900 text-slate-100">
       {/* Top Bar Filter & Statistic Ribbon */}
       <div className="bg-slate-800/90 border-b border-slate-700/80 px-4 py-3 shrink-0 backdrop-blur-md z-30">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
+        <div className="app-shell flex flex-wrap items-center justify-between gap-3">
           {/* Title & Quick Stats */}
           <div className="flex items-center space-x-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shadow-md shadow-emerald-700/30">
@@ -340,7 +340,10 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
                   Peta Sebaran Spasial Petani & Supplier
                 </h1>
                 <span className="bg-emerald-500/20 text-emerald-400 text-[11px] font-semibold px-2 py-0.5 rounded-full border border-emerald-500/30 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  <span className="relative flex w-1.5 h-1.5">
+                    <span className="absolute inline-flex w-full h-full rounded-full bg-emerald-400 opacity-60 animate-ping" />
+                    <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  </span>
                   Google Maps Live
                 </span>
               </div>
@@ -380,7 +383,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
         </div>
 
         {/* Filter and Layer Controls Row */}
-        <div className="max-w-7xl mx-auto mt-2.5 pt-2.5 border-t border-slate-700/60 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="app-shell mt-2.5 pt-2.5 border-t border-slate-700/60 flex flex-wrap items-center justify-between gap-2 text-xs">
           {/* Search and Filters */}
           <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[280px]">
             {/* Search Input */}

@@ -331,7 +331,8 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      <main className={activeTab === 'map' ? 'flex-1 p-0 overflow-hidden' : 'flex-1 px-4 sm:px-6 lg:px-8 py-4'}>
+      <main className={activeTab === 'map' ? 'flex-1 p-0 overflow-hidden' : 'flex-1 px-4 sm:px-6 lg:px-8 py-6'}>
+        <div key={activeTab} className="animate-fade-in">
         {activeTab === 'dashboard' && (
           <AgriProfessionalDashboard
             farmers={farmers}
@@ -340,8 +341,6 @@ export default function App() {
             onRefreshData={loadData}
             loading={loading}
             onNavigateToSheets={() => setActiveTab('sheets')}
-            onNavigateToChat={() => setActiveTab('chat')}
-            onNavigateToMap={() => setActiveTab('map')}
           />
         )}
 
@@ -398,6 +397,7 @@ export default function App() {
             onAddFarmerClick={() => setIsAddFarmerModalOpen(true)}
           />
         )}
+        </div>
       </main>
 
       {/* Modals */}

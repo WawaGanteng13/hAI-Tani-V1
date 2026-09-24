@@ -137,7 +137,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
 
   useEffect(() => {
     fetchAiMetrics();
-    const interval = setInterval(fetchAiMetrics, 8000);
+    const interval = setInterval(() => { if (!document.hidden) fetchAiMetrics(); }, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -599,9 +599,9 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
   };
 
   return (
-    <div className="space-y-4 max-w-7xl mx-auto py-2">
+    <div className="app-shell space-y-4 animate-fade-in">
       {/* SENDER PHONE & RBAC SIMULATION BAR */}
-      <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+      <div className="card p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 w-full md:w-auto">
           <div className="flex items-center space-x-2 shrink-0">
             <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center space-x-1.5">
@@ -727,7 +727,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
       {/* Main Grid: WhatsApp Window + HUD */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left / Main: WhatsApp Simulator Window */}
-        <div className="lg:col-span-8 flex flex-col h-[740px] bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+        <div className="lg:col-span-8 flex flex-col h-[740px] card shadow-xl border border-slate-200 overflow-hidden">
           {/* WhatsApp Header */}
           <div className="bg-[#075E54] text-white px-4 py-3 flex items-center justify-between shadow-md">
             <div className="flex items-center space-x-3">
@@ -1190,7 +1190,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
             {isRealRecording ? (
               <div className="flex-1 flex items-center justify-between bg-rose-50 border border-rose-300 rounded-full px-4 py-1.5 shadow-2xs">
                 <div className="flex items-center space-x-2 text-rose-700 font-mono text-xs font-bold">
-                  <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-ping"></span>
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-pulse"></span>
                   <span>Merekam: 0:{recordSeconds < 10 ? '0' : ''}{recordSeconds}</span>
                   <span className="text-[11px] text-slate-500 font-sans hidden sm:inline">(Bicara jelas ke mikrofon)</span>
                 </div>
@@ -1331,7 +1331,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
           </div>
 
           {/* Active Authority HUD */}
-          <div className="bg-white rounded-2xl shadow-md border border-slate-200 p-5">
+          <div className="card shadow-md border border-slate-200 p-5">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center space-x-2">
                 <div
@@ -1386,7 +1386,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
           </div>
 
           {/* Quick Interactive Tests */}
-          <div className="bg-white rounded-2xl shadow-md border border-slate-200 p-5">
+          <div className="card shadow-md border border-slate-200 p-5">
             <h4 className="font-bold text-xs text-slate-700 uppercase tracking-wider mb-2">
               Uji Coba Cepat Peran (RBAC)
             </h4>
@@ -1568,7 +1568,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
           </div>
 
           {/* Real-Time Extraction HUD Card */}
-          <div className="bg-white rounded-2xl shadow-md border border-slate-200 p-5">
+          <div className="card shadow-md border border-slate-200 p-5">
             {/* Draft Mode Selector Tabs */}
             <div className="flex rounded-xl bg-slate-100 p-1 mb-4">
               <button

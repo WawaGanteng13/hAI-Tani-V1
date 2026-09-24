@@ -28,7 +28,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   return (
     <header className="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-40 shadow-sm">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="app-shell px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           {/* Logo & Branding */}
           <div className="flex items-center space-x-3">
@@ -58,7 +58,7 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Cpu className={`w-3.5 h-3.5 ${nineRouterActive ? 'text-indigo-400 animate-pulse' : 'text-slate-400'}`} />
                 <span className="hidden sm:inline">9Router:</span>
-                <span className={`font-mono px-1.5 py-0.2 rounded font-bold text-[11px] ${
+                <span className={`font-mono px-1.5 py-0.5 rounded font-bold text-[11px] ${
                   nineRouterActive ? 'bg-indigo-900 text-indigo-200' : 'bg-slate-800 text-slate-400'
                 }`}>
                   {nineRouterActive ? 'Gateway' : 'Failover'}
@@ -74,7 +74,7 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <span className="text-amber-400">🛡️</span>
                 <span className="hidden sm:inline">Nomor Admin:</span>
-                <span className="font-mono bg-amber-900/90 text-amber-200 px-1.5 py-0.2 rounded font-bold">
+                <span className="font-mono bg-amber-900/90 text-amber-200 px-1.5 py-0.5 rounded font-bold">
                   {adminsCount}
                 </span>
               </button>
@@ -102,7 +102,7 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
 
             <div className="hidden lg:flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-xs text-slate-300">
-              <span className="w-2 h-2 rounded-full bg-green-500 animate-ping" />
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
               <span>Sheets Sync:</span>
               <span className="font-semibold text-emerald-400">Connected</span>
             </div>
@@ -121,7 +121,7 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <BarChart3 className="w-4 h-4 text-emerald-300" />
             <span>Dashboard Profesional</span>
-            <span className="bg-emerald-500/30 text-emerald-300 text-[10px] px-1.5 py-0.2 rounded-full font-mono font-semibold">
+            <span className="bg-emerald-500/30 text-emerald-300 text-[10px] px-1.5 py-0.5 rounded-full font-mono font-semibold">
               Analitik
             </span>
           </button>
@@ -136,7 +136,7 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Table className="w-4 h-4" />
             <span>Database Google Sheets</span>
-            <span className="bg-slate-700 text-slate-200 text-[10px] px-1.5 py-0.2 rounded-full font-mono">
+            <span className="bg-slate-700 text-slate-200 text-[10px] px-1.5 py-0.5 rounded-full font-mono">
               {farmersCount}
             </span>
           </button>
@@ -151,7 +151,7 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <MessageSquare className="w-4 h-4" />
             <span>Chatbot WhatsApp</span>
-            <span className="bg-emerald-800/80 text-emerald-200 text-[10px] px-1.5 py-0.2 rounded-full font-mono">
+            <span className="bg-emerald-800/80 text-emerald-200 text-[10px] px-1.5 py-0.5 rounded-full font-mono">
               Live
             </span>
           </button>
@@ -167,7 +167,7 @@ export const Header: React.FC<HeaderProps> = ({
             <TrendingUp className="w-4 h-4" />
             <span>Anomali Harga & Notifikasi</span>
             {anomaliesCount > 0 && (
-              <span className="bg-rose-500 text-white text-[10px] px-1.5 py-0.2 rounded-full font-bold animate-pulse">
+              <span className="bg-rose-500 text-white text-[10px] px-1.5 py-0.5 rounded-full font-bold animate-pulse">
                 {anomaliesCount} Anomali
               </span>
             )}
@@ -183,7 +183,7 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Cpu className="w-4 h-4 text-indigo-300" />
             <span>Portal Data Scientist & Rekomendasi</span>
-            <span className="bg-indigo-900/80 text-indigo-200 text-[10px] px-1.5 py-0.2 rounded-full font-mono">
+            <span className="bg-indigo-900/80 text-indigo-200 text-[10px] px-1.5 py-0.5 rounded-full font-mono">
               AI
             </span>
           </button>
@@ -198,7 +198,7 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <MapPin className="w-4 h-4 text-emerald-300" />
             <span>Peta Sebaran Petani & Supplier</span>
-            <span className="bg-emerald-500/30 text-emerald-300 text-[10px] px-1.5 py-0.2 rounded-full font-mono font-semibold">
+            <span className="bg-emerald-500/30 text-emerald-300 text-[10px] px-1.5 py-0.5 rounded-full font-mono font-semibold">
               Maps
             </span>
           </button>

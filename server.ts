@@ -20,6 +20,8 @@ import {
   SupplierRecord,
 } from "./src/types";
 import { calculateFertilizerRecommendation } from "./src/utils/agronomy";
+import { nextId } from "./lib/next-id";
+import { nextSheetRow } from "./lib/sheet-row";
 
 dotenv.config();
 
@@ -50,46 +52,53 @@ let webhookLogs: Array<{ id: string; timestamp: string; event: string; detail: s
   },
 ];
 
+function readJsonSafe<T>(file: string, fallback: T, label: string): T {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    return JSON.parse(fs.readFileSync(file, "utf-8")) as T;
+  } catch (err) {
+    console.error(`[Storage] ${label} korup, pakai data awal:`, (err as Error)?.message);
+    try {
+      fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+    } catch {}
+    return fallback;
+  }
+}
+
 function initPersistence() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    if (fs.existsSync(FARMERS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(FARMERS_FILE, "utf-8"));
-      if (Array.isArray(data) && data.length > 0) {
-        farmersDb = data.map((f: FarmerRecord) => {
-          const init = INITIAL_FARMERS.find((i) => i.id === f.id);
-          return {
-            ...f,
-            latitude: f.latitude ?? init?.latitude ?? -6.5 + (Math.random() * 0.1 - 0.05),
-            longitude: f.longitude ?? init?.longitude ?? 107.5 + (Math.random() * 0.1 - 0.05),
-            supplierTerhubungId: f.supplierTerhubungId ?? init?.supplierTerhubungId,
-          };
-        });
-        console.log(`[Storage] Berhasil memuat ${farmersDb.length} data petani dari disk (${FARMERS_FILE})`);
-      }
-    } else {
+    const farmersData = readJsonSafe<unknown>(FARMERS_FILE, [], "farmers_db.json");
+    if (Array.isArray(farmersData) && farmersData.length > 0) {
+      farmersDb = (farmersData as FarmerRecord[]).map((f: FarmerRecord) => {
+        const init = INITIAL_FARMERS.find((i) => i.id === f.id);
+        return {
+          ...f,
+          latitude: f.latitude ?? init?.latitude ?? -6.5 + (Math.random() * 0.1 - 0.05),
+          longitude: f.longitude ?? init?.longitude ?? 107.5 + (Math.random() * 0.1 - 0.05),
+          supplierTerhubungId: f.supplierTerhubungId ?? init?.supplierTerhubungId,
+        };
+      });
+      console.log(`[Storage] Berhasil memuat ${farmersDb.length} data petani dari disk (${FARMERS_FILE})`);
+    } else if (!fs.existsSync(FARMERS_FILE)) {
       saveFarmersToDisk();
     }
 
-    if (fs.existsSync(ADMINS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(ADMINS_FILE, "utf-8"));
-      if (Array.isArray(data) && data.length > 0) {
-        adminsDb = data;
-        console.log(`[Storage] Berhasil memuat ${adminsDb.length} admin dari disk (${ADMINS_FILE})`);
-      }
-    } else {
+    const adminsData = readJsonSafe<unknown>(ADMINS_FILE, [], "admins_db.json");
+    if (Array.isArray(adminsData) && adminsData.length > 0) {
+      adminsDb = adminsData as AdminUser[];
+      console.log(`[Storage] Berhasil memuat ${adminsDb.length} admin dari disk (${ADMINS_FILE})`);
+    } else if (!fs.existsSync(ADMINS_FILE)) {
       saveAdminsToDisk();
     }
 
-    if (fs.existsSync(SUPPLIERS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(SUPPLIERS_FILE, "utf-8"));
-      if (Array.isArray(data) && data.length > 0) {
-        suppliersDb = data;
-        console.log(`[Storage] Berhasil memuat ${suppliersDb.length} data supplier dari disk (${SUPPLIERS_FILE})`);
-      }
-    } else {
+    const suppliersData = readJsonSafe<unknown>(SUPPLIERS_FILE, [], "suppliers_db.json");
+    if (Array.isArray(suppliersData) && suppliersData.length > 0) {
+      suppliersDb = suppliersData as SupplierRecord[];
+      console.log(`[Storage] Berhasil memuat ${suppliersDb.length} data supplier dari disk (${SUPPLIERS_FILE})`);
+    } else if (!fs.existsSync(SUPPLIERS_FILE)) {
       saveSuppliersToDisk();
     }
   } catch (err) {
@@ -97,37 +106,30 @@ function initPersistence() {
   }
 }
 
-function saveFarmersToDisk() {
+function writeJsonAtomic(file: string, data: unknown, label: string) {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(FARMERS_FILE, JSON.stringify(farmersDb, null, 2), "utf-8");
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+    fs.renameSync(tmp, file);
   } catch (err) {
-    console.error("[Storage] Gagal menyimpan farmers_db.json:", err);
+    console.error(`[Storage] Gagal menyimpan ${label}:`, err);
   }
+}
+
+// nextId: single source di ./lib/next-id (ada self-check).
+function saveFarmersToDisk() {
+  writeJsonAtomic(FARMERS_FILE, farmersDb, "farmers_db.json");
 }
 
 function saveAdminsToDisk() {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(ADMINS_FILE, JSON.stringify(adminsDb, null, 2), "utf-8");
-  } catch (err) {
-    console.error("[Storage] Gagal menyimpan admins_db.json:", err);
-  }
+  writeJsonAtomic(ADMINS_FILE, adminsDb, "admins_db.json");
 }
 
 function saveSuppliersToDisk() {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(SUPPLIERS_FILE, JSON.stringify(suppliersDb, null, 2), "utf-8");
-  } catch (err) {
-    console.error("[Storage] Gagal menyimpan suppliers_db.json:", err);
-  }
+  writeJsonAtomic(SUPPLIERS_FILE, suppliersDb, "suppliers_db.json");
 }
 
 // Inisialisasi data storage saat server pertama kali booting
@@ -388,7 +390,7 @@ function saveFarmerRecord(
   senderPhone?: string
 ): FarmerRecord {
   const newRecord: FarmerRecord = {
-    id: `TANI-${String(farmersDb.length + 1).padStart(3, "0")}`,
+    id: nextId("TANI", farmersDb.map((f) => f.id)),
     timestamp: new Date().toISOString().replace("T", " ").substring(0, 19),
     nama: draft.nama || "Petani Mitra",
     noHp: draft.noHp || senderPhone || "+62 812-xxxx-xxxx",
@@ -405,7 +407,10 @@ function saveFarmerRecord(
       ? `Didata & divalidasi langsung oleh ${activeAdmin.nama} (${activeAdmin.role}) via WhatsApp pada ${new Date().toLocaleDateString("id-ID")}. Data lengkap tersinkronisasi ke Google Sheets.`
       : `Tercatat lengkap via WhatsApp Chatbot pada ${new Date().toLocaleDateString("id-ID")}. Data telah divalidasi dan tersinkronisasi ke Google Sheets.`,
     syncStatus: "synced",
-    googleSheetRow: farmersDb.length + 2,
+    googleSheetRow: nextSheetRow(
+      farmersDb.map((f) => f.googleSheetRow),
+      farmersDb.length,
+    ),
   };
   farmersDb.unshift(newRecord);
   saveFarmersToDisk();
@@ -616,7 +621,7 @@ function saveSupplierRecord(
   activeAdmin?: AdminUser,
   senderPhone?: string
 ): SupplierRecord {
-  const newId = `SUP-${String(suppliersDb.length + 1).padStart(3, "0")}`;
+  const newId = nextId("SUP", suppliersDb.map((s) => s.id));
   const now = new Date();
   const timestamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
 
@@ -645,7 +650,10 @@ function saveSupplierRecord(
       (activeAdmin
         ? `Didata langsung via WhatsApp oleh Admin ${activeAdmin.nama} (${activeAdmin.role} - ${activeAdmin.instansi}) pada ${now.toLocaleDateString("id-ID")}.`
         : `Didaftarkan via WhatsApp Chatbot pada ${now.toLocaleDateString("id-ID")}.`),
-    googleSheetRow: suppliersDb.length + 2,
+    googleSheetRow: nextSheetRow(
+      suppliersDb.map((s) => s.googleSheetRow),
+      suppliersDb.length,
+    ),
     timestamp,
     syncStatus: "synced",
   };
@@ -837,7 +845,7 @@ function generateSmartAdminFallback(
       : "padi";
 
     const filtered = farmers.filter(
-      (f) => f.komoditas.toLowerCase().includes(keyword) || f.varietas.toLowerCase().includes(keyword)
+      (f) => f.komoditas.toLowerCase().includes(keyword) || (f.varietas || "").toLowerCase().includes(keyword)
     );
     const cLuas = filtered.reduce((acc, f) => acc + (f.luasLahan || 0), 0).toFixed(1);
     const cPanen = filtered.reduce((acc, f) => acc + (f.estimasiHasilTon || 0), 0).toFixed(1);
@@ -846,7 +854,7 @@ function generateSmartAdminFallback(
       .slice(0, 5)
       .map(
         (f, i) =>
-          `${i + 1}. *${f.nama}* (${f.noHp})\n   📍 ${f.kabupaten || f.alamat}\n   🌾 Varietas: ${f.varietas} | Lahan: *${f.luasLahan} Ha*\n   🗓️ Estimasi Panen: ${f.estimasiPanen} (~*${f.estimasiHasilTon} Ton*) [${f.statusVerifikasi}]`
+          `${i + 1}. *${f.nama}* (${f.noHp})\n   📍 ${f.kabupaten || f.alamat}\n   🌾 Varietas: ${f.varietas || "—"} | Lahan: *${f.luasLahan} Ha*\n   🗓️ Estimasi Panen: ${f.estimasiPanen} (~*${f.estimasiHasilTon} Ton*) [${f.statusVerifikasi}]`
       )
       .join("\n\n");
 
@@ -1005,7 +1013,8 @@ let totalCacheHits = 0;
 
 function bumpDataVersion() {
   currentDataVersion++;
-  console.log(`[AI Optimization] Data version updated (${currentDataVersion}). Cache invalidation synchronized.`);
+  // ponytail: clear ganti LRU saat cache besar.
+  if (aiResponseCache.size > 200) for (const k of aiResponseCache.keys()) { aiResponseCache.delete(k); if (aiResponseCache.size <= 150) break; }
 }
 
 function getNormalizedCacheKey(role: string, message: string): string {
@@ -1025,6 +1034,80 @@ function isQuerySafeToCache(message: string): boolean {
     "nama saya", "lahan saya", "panen saya", "desa ", "kecamatan ", "08", "+62"
   ];
   return !mutationKeywords.some((k) => lower.includes(k));
+}
+
+// Rate limiter stdlib (tanpa dep). ponytail: ganti redis saat multi-instance.
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+function rateLimit(max: number, windowMs: number) {
+  return (req: any, res: any, next: any) => {
+    const ip = (req.ip || req.headers["x-forwarded-for"] || "local") as string;
+    const key = `${ip}:${req.path}`;
+    const now = Date.now();
+    if (rateBuckets.size > 1000) for (const [k, v] of rateBuckets) if (now > v.resetAt) rateBuckets.delete(k);
+    const b = rateBuckets.get(key);
+    if (!b || now > b.resetAt) {
+      rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    b.count += 1;
+    if (b.count > max) {
+      return res.status(429).json({ error: "Terlalu banyak permintaan, coba lagi nanti." });
+    }
+    next();
+  };
+}
+
+function sanitizeText(s: unknown, maxLen = 2000): string {
+  if (typeof s !== "string") return "";
+  return s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "").slice(0, maxLen).trim();
+}
+function escHtml(s: unknown): string {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => (({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }) as any)[c]);
+}
+function escAttr(s: unknown): string {
+  return escHtml(s).replace(/[\r\n]+/g, " ");
+}
+function cleanHost(h: unknown, fb = "localhost:3000"): string {
+  const s = String(h || fb).slice(0, 80);
+  return /^[\w.\-:]+$/.test(s) ? s : fb;
+}
+const ADD_WORDS = ["tambah", "daftarkan", "daftar", "input", "masukkan", "catat", "simpan"];
+function isAddRegex(lower: string): boolean {
+  for (const w of ADD_WORDS) if ((lower || "").includes(w)) return true;
+  return false;
+}
+// Laya intent sidecar (stdlib http, opt-in via LAYA_URL). Timeout 1.2s, cooldown 30s saat down.
+// Lazy: hanya fetch saat regex belum yakin + cache 10 mnt. Regex hit -> 0ms overhead.
+// ponytail: ganti ke laya[serve] batch saat butuh throughput.
+const LAYA_URL = (process.env.LAYA_URL?.trim() || "http://127.0.0.1:8787").replace(/\/+$/, "");
+let layaUnavailableUntil = 0;
+const layaCache = new Map<string, { v: { intent: string; confidence: number }; exp: number }>();
+async function getLayaIntent(message: string): Promise<{ intent: string; confidence: number } | null> {
+  if (!message || Date.now() < layaUnavailableUntil) return null;
+  const key = message.slice(0, 200).toLowerCase();
+  const hit = layaCache.get(key);
+  if (hit) { if (Date.now() < hit.exp) return hit.v; layaCache.delete(key); }
+  if (layaCache.size > 500) for (const [k, v] of layaCache) { if (Date.now() > v.exp) layaCache.delete(k); if (layaCache.size <= 400) break; }
+  try {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 1200);
+    const res = await fetch(`${LAYA_URL}/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: message.slice(0, 2000) }),
+      signal: c.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) throw new Error(`laya ${res.status}`);
+    const j: any = await res.json();
+    if (!j?.intent) return null;
+    const v = { intent: String(j.intent), confidence: Number(j.confidence || 0) };
+    layaCache.set(key, { v, exp: Date.now() + 600000 });
+    return v;
+  } catch {
+    layaUnavailableUntil = Date.now() + 30000;
+    return null;
+  }
 }
 
 // 1. Targeted & Summarized Context Builder (No massive raw JSON dumps!)
@@ -1354,7 +1437,17 @@ async function callUniversalAI(
 
 export function createServerApp() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: "1mb" }));
+  // ponytail: header minimal tanpa dep; tambah helmet saat production.
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    next();
+  });
+  // Rate-limit stdlib di jalur tulis. Baca (GET) bebas.
+  const writeLimit = rateLimit(60, 60_000);
+  app.use((req, _res, next) => (req.method === "POST" ? writeLimit(req as any, _res as any, next) : next()));
 
   // Health check endpoint
   app.get("/api/health", (_req, res) => {
@@ -1372,6 +1465,7 @@ export function createServerApp() {
         configured: nineCfg.isConfigured,
         model: nineCfg.model,
       },
+      laya: { url: LAYA_URL, down: Date.now() < layaUnavailableUntil },
     });
   });
 
@@ -1432,7 +1526,7 @@ export function createServerApp() {
     }
 
     const newAdmin: AdminUser = {
-      id: `ADM-${String(adminsDb.length + 1).padStart(3, "0")}`,
+      id: nextId("ADM", adminsDb.map((a) => a.id)),
       nama: nama.trim(),
       noHp: noHp.trim(),
       instansi: instansi || "Dinas Pertanian / PPL Lapangan",
@@ -1444,6 +1538,7 @@ export function createServerApp() {
 
     adminsDb.push(newAdmin);
     saveAdminsToDisk();
+    bumpDataVersion();
     res.status(201).json(newAdmin);
   });
 
@@ -1453,8 +1548,13 @@ export function createServerApp() {
     if (id === "ADM-001") {
       return res.status(403).json({ error: "Super Admin utama tidak dapat dihapus." });
     }
+    const before = adminsDb.length;
     adminsDb = adminsDb.filter((a) => a.id !== id);
+    if (adminsDb.length === before) {
+      return res.status(404).json({ error: "Admin tidak ditemukan." });
+    }
     saveAdminsToDisk();
+    bumpDataVersion();
     res.json({ success: true, message: "Nomor admin berhasil dihapus." });
   });
 
@@ -1475,7 +1575,7 @@ export function createServerApp() {
     }
 
     const newFarmer: FarmerRecord = {
-      id: `TANI-${String(farmersDb.length + 1).padStart(3, "0")}`,
+      id: nextId("TANI", farmersDb.map((f) => f.id)),
       timestamp: new Date().toISOString().replace("T", " ").substring(0, 19),
       nama: data.nama,
       noHp: data.noHp || "+62 8xx-xxxx-xxxx",
@@ -1490,13 +1590,17 @@ export function createServerApp() {
       statusVerifikasi: data.statusVerifikasi || "Terverifikasi",
       catatanAI: data.catatanAI || "Data dicatat melalui sistem TaniAI.",
       syncStatus: "synced",
-      googleSheetRow: farmersDb.length + 2,
+      googleSheetRow: nextSheetRow(
+        farmersDb.map((f) => f.googleSheetRow),
+        farmersDb.length,
+      ),
       latitude: data.latitude !== undefined ? Number(data.latitude) : -6.5 + (Math.random() * 0.1 - 0.05),
       longitude: data.longitude !== undefined ? Number(data.longitude) : 107.5 + (Math.random() * 0.1 - 0.05),
       supplierTerhubungId: data.supplierTerhubungId || undefined,
     };
     farmersDb.unshift(newFarmer);
     saveFarmersToDisk();
+    bumpDataVersion();
     res.status(201).json(newFarmer);
   });
 
@@ -1530,6 +1634,7 @@ export function createServerApp() {
     };
     farmersDb[idx] = updated;
     saveFarmersToDisk();
+    bumpDataVersion();
     res.json(updated);
   });
 
@@ -1543,14 +1648,20 @@ export function createServerApp() {
     farmer.statusVerifikasi = "Terverifikasi";
     farmer.catatanAI = `Divalidasi langsung oleh Petugas PPL Lapangan pada ${new Date().toLocaleDateString("id-ID")}. Polygon dan berkas lahan lengkap.`;
     saveFarmersToDisk();
+    bumpDataVersion();
     res.json({ success: true, farmer });
   });
 
   // DELETE farmer by ID
   app.delete("/api/farmers/:id", (req, res) => {
     const { id } = req.params;
+    const before = farmersDb.length;
     farmersDb = farmersDb.filter((f) => f.id !== id);
+    if (farmersDb.length === before) {
+      return res.status(404).json({ error: "Data petani tidak ditemukan." });
+    }
     saveFarmersToDisk();
+    bumpDataVersion();
     res.json({ success: true, message: `Data petani ${id} berhasil dihapus.` });
   });
 
@@ -1837,6 +1948,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
       item.tren7Hari.shift();
     }
 
+    bumpDataVersion();
     res.json(item);
   });
 
@@ -2208,11 +2320,22 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
 
   // POST Chatbot endpoint (Kang Tani AI) with Role-Based Access Control (RBAC) & Cost Optimization
   app.post("/api/chat", async (req, res) => {
-    const { message, history, currentDraft, currentSupplierDraft, senderPhone } = req.body;
+    const raw = req.body || {};
+    const message = sanitizeText(raw.message, 2000);
+    const { history, currentDraft, currentSupplierDraft, senderPhone } = raw;
     const ai = getGemini();
 
     const activeAdmin = findAdmin(senderPhone);
     const isAdmin = !!activeAdmin;
+
+    // Laya intent lazy: regex dulu (0ms), sidecar hanya saat regex miss.
+    // Null saat sidecar mati -> regex tetap jalan.
+    let _chatLaya: { intent: string; confidence: number } | null | undefined;
+    const chatLaya = async () => {
+      if (_chatLaya !== undefined) return _chatLaya;
+      _chatLaya = await getLayaIntent(message);
+      return _chatLaya;
+    };
 
     // 0. Cancellation controller: stops AI generation immediately if client aborts or cancels
     const clientAbortController = new AbortController();
@@ -2233,7 +2356,12 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         currentSupplierDraft.alamat ||
         currentSupplierDraft.kabupaten ||
         currentSupplierDraft.kontak);
-    const isSupplierMsg = isSupplierIntent(message);
+    const isSupplierRegex = isSupplierIntent(message);
+    let isSupplierMsg = isSupplierRegex;
+    if (!isSupplierMsg) {
+      const l = await chatLaya();
+      isSupplierMsg = l?.intent === "supplier" && (l?.confidence || 0) >= 0.5;
+    }
     const lowerMsg = (message || "").toLowerCase();
     const isAddAction =
       lowerMsg.includes("tambah") ||
@@ -2554,14 +2682,17 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     if (!ai) {
       // Intelligent rule-based fallback if API key is not yet set
       const lower = (message || "").toLowerCase();
-      const isAddIntent =
-        lower.includes("tambah") ||
-        lower.includes("daftarkan") ||
-        lower.includes("daftar") ||
-        lower.includes("input") ||
-        lower.includes("masukkan") ||
-        lower.includes("catat") ||
-        lower.includes("simpan");
+      const regexAdd = isAddRegex(lower);
+      // Lazy laya: hanya fetch saat regex miss (0ms saat regex hit).
+      let laya: { intent: string; confidence: number } | null = null;
+      if (!regexAdd) laya = await chatLaya();
+      const isAddIntent = regexAdd || (laya?.intent === "daftar_lahan" && (laya?.confidence || 0) >= 0.5);
+      const isPriceIntent =
+        lower.includes("harga") ||
+        lower.includes("pasar") ||
+        lower.includes("anomali") ||
+        (laya?.intent === "cek_harga" && (laya?.confidence || 0) >= 0.5);
+      const isHamaIntent = laya?.intent === "hama_pupuk" && (laya?.confidence || 0) >= 0.5;
 
       const reg = extractFarmerFromText(message, currentDraft || {});
       let extracted: Partial<FarmerRecord> = { ...(currentDraft || {}), ...reg.extracted };
@@ -2593,7 +2724,11 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       let replyText =
         "🌾 *Salam Berkah Petani!* Saya Kang Tani AI, asisten digital siap melayani konsultasi pertanian dan pendaftaran lahan ke Google Sheets. Boleh tahu nama Bapak/Ibu, luas lahan, dan komoditas apa yang sedang ditanam?";
 
-      if (lower.includes("padi") || lower.includes("cabai") || lower.includes("bawang") || lower.includes("jagung")) {
+      if (isPriceIntent) {
+        replyText = `📊 *Informasi Harga Pasar Terkini:*\n• Beras Premium: Rp 16.200/kg\n• Cabai Rawit Merah: Rp 82.000/kg (⚠️ Lonjakan Ekstrem +36.7%)\n• Bawang Merah: Rp 28.500/kg\n• Jagung Pipil: Rp 5.800/kg\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
+      } else if (isHamaIntent) {
+        replyText = `🌱 *Konsultasi Hama & Pupuk siap!* Ceritakan gejala di lahan (misal: daun menguning, wereng, ulat) + komoditas + luas lahan, nanti Kang Tani kasih takaran dan jadwal aplikasi.`;
+      } else if (lower.includes("padi") || lower.includes("cabai") || lower.includes("bawang") || lower.includes("jagung")) {
         const crop = lower.includes("cabai")
           ? "Cabai Rawit Merah"
           : lower.includes("bawang")
@@ -2734,14 +2869,15 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     // Rule-based fallback response
     console.log("[Chat Info] Serving rule-based fallback reply");
     const lower = (message || "").toLowerCase();
-    const isAddRequest =
-      lower.includes("tambah") ||
-      lower.includes("daftarkan") ||
-      lower.includes("daftar") ||
-      lower.includes("input") ||
-      lower.includes("masukkan") ||
-      lower.includes("catat") ||
-      lower.includes("simpan");
+    const regexAdd = isAddRegex(lower);
+    // Lazy laya: hanya fetch saat regex miss.
+    let layaFb: { intent: string; confidence: number } | null = null;
+    if (!regexAdd) layaFb = await chatLaya();
+    const isAddRequest = regexAdd || (layaFb?.intent === "daftar_lahan" && (layaFb?.confidence || 0) >= 0.5);
+    const isPriceFb =
+      lower.includes("harga") ||
+      lower.includes("pasar") ||
+      (layaFb?.intent === "cek_harga" && (layaFb?.confidence || 0) >= 0.5);
 
     const reg = extractFarmerFromText(message, currentDraft || {});
     const extracted: Partial<FarmerRecord> = { ...(currentDraft || {}), ...reg.extracted };
@@ -2774,7 +2910,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     let fallbackReply =
       "🌾 *Salam Berkah Petani!* Pesan Bapak/Ibu telah diterima Kang Tani AI. Boleh disampaikan nama lengkap, luas lahan, dan komoditas apa yang sedang ditanam agar kami catat ke Google Sheets?";
 
-    if (lower.includes("harga") || lower.includes("pasar")) {
+    if (isPriceFb) {
       fallbackReply = `📊 *Informasi Harga Pasar Terkini:*\n• Beras Premium: Rp 16.200/kg\n• Cabai Rawit Merah: Rp 82.000/kg (⚠️ Lonjakan Ekstrem +36.7%)\n• Bawang Merah: Rp 28.500/kg\n• Jagung Pipil: Rp 5.800/kg\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
     } else if (lower.includes("padi") || lower.includes("cabai") || lower.includes("bawang") || lower.includes("jagung")) {
       const crop = lower.includes("cabai")
@@ -2924,16 +3060,83 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     return res.status(403).send("Verification token mismatch");
   });
 
-  // Webhook WhatsApp Message Receiver
+  // Webhook WhatsApp Message Receiver (Meta Cloud API)
   app.post("/api/webhook/whatsapp", async (req, res) => {
     try {
-      const body = req.body;
-      console.log("Incoming WhatsApp Webhook event:", JSON.stringify(body));
+      const body = req.body || {};
+      const entry = body?.entry?.[0]?.changes?.[0]?.value;
+      const msg = entry?.messages?.[0];
+      const text = msg?.text?.body || msg?.button?.text || "";
+      const from = msg?.from || "";
+      if (text) {
+        const clean = sanitizeText(text, 2000);
+        const { extracted } = extractFarmerFromText(clean, {});
+        const check = checkFarmerCompleteness({ ...extracted, noHp: from || extracted.noHp });
+        if (check.isComplete) {
+          const saved = saveFarmerRecord({ ...extracted, noHp: from || extracted.noHp });
+          console.log(`[WA] petani tersimpan ${saved.id} dari ${from}`);
+        } else {
+          console.log(`[WA] draf masuk dari ${from}: ${check.missingFields.join(", ")}`);
+        }
+      } else {
+        console.log("Incoming WhatsApp Webhook event:", JSON.stringify(body).slice(0, 500));
+      }
       res.status(200).send("EVENT_RECEIVED");
     } catch (err) {
       console.error("Webhook processing error:", err);
       res.status(500).send("INTERNAL_ERROR");
     }
+  });
+
+  // Korelasi Pearson luas vs ton (stdlib, tanpa dep).
+  app.get("/api/analytics/correlation", (_req, res) => {
+    const xs = farmersDb.map((f) => Number(f.luasLahan) || 0);
+    const ys = farmersDb.map((f) => Number(f.estimasiHasilTon) || 0);
+    const n = xs.length;
+    if (n < 2) return res.json({ n, r: 0 });
+    const mx = xs.reduce((a, b) => a + b, 0) / n;
+    const my = ys.reduce((a, b) => a + b, 0) / n;
+    let num = 0, dx = 0, dy = 0;
+    for (let i = 0; i < n; i++) { num += (xs[i] - mx) * (ys[i] - my); dx += (xs[i] - mx) ** 2; dy += (ys[i] - my) ** 2; }
+    const r = dx && dy ? Number((num / Math.sqrt(dx * dy)).toFixed(3)) : 0;
+    res.json({ n, r });
+  });
+
+  // Simulasi intervensi Dinas (resapan gudang, CAS 30-45 hari, subsidi ongkir, OP murah).
+  app.post("/api/interventions/simulate", (req, res) => {
+    const b = req.body || {};
+    const ton = Number(b.estimasiTon || farmersDb.reduce((a, f) => a + (f.estimasiHasilTon || 0), 0));
+    const harga = Number(b.hargaKg || 12000);
+    const resapan = Math.min(1, Math.max(0, Number(b.resapanPersen ?? 20) / 100));
+    const casHari = Math.min(45, Math.max(0, Number(b.casHari ?? 30)));
+    const subsidiKg = Math.max(0, Number(b.subsidiOngkirKg ?? 0));
+    const opKg = Math.max(0, Number(b.operasiPasarKg ?? 0));
+    const nilaiTerserap = Math.round(ton * 1000 * resapan * harga);
+    const nilaiCas = Math.round(ton * 1000 * (1 - resapan) * harga * (casHari / 45) * 0.05);
+    const biayaSubsidi = Math.round(ton * 1000 * subsidiKg);
+    const nilaiOp = Math.round(opKg * harga);
+    res.json({ ton, harga, resapan: resapan * 100, casHari, nilaiTerserap, nilaiCas, biayaSubsidi, nilaiOp });
+  });
+
+  // Broadcast hama khusus (template + endpoint sendiri).
+  app.post("/api/notifications/pest-broadcast", (req, res) => {
+    const komoditas = sanitizeText(req.body?.komoditas || "Padi", 80) || "Padi";
+    const hama = sanitizeText(req.body?.hama || "wereng", 80) || "wereng";
+    const anjuran = sanitizeText(req.body?.anjuran || "Lapor PPL, pasang perangkap kuning, semprot neem 2ml/L pagi hari.", 500);
+    const target = farmersDb.filter((f) => (f.komoditas || "").toLowerCase().includes(komoditas.toLowerCase().split(" ")[0]));
+    const pesan = `🐛 *[TaniAI SIAGA HAMA]*\nYth. Petani ${komoditas},\nWaspada serangan ${hama}.\n💡 ${anjuran}\n_Lapor PPL bila >10% rumpun terdampak._`;
+    const notif: AnomalyNotification = {
+      id: `pest-${Date.now()}`,
+      komoditas,
+      tipeAnomali: "PERINGATAN_PASAR",
+      pesanPeringatan: pesan,
+      waktuKirim: new Date().toLocaleString("id-ID") + " WIB",
+      jumlahPetaniTerdampak: Math.max(target.length, 1),
+      status: "Terkirim",
+      targetPetaniNames: target.length ? target.map((f) => f.nama) : ["Seluruh Petani Terdaftar"],
+    };
+    notificationsDb.unshift(notif);
+    res.json({ success: true, notification: notif });
   });
 
   // CSV Export for Google Sheets
@@ -2989,28 +3192,29 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   app.get("/api/sheets/live-view", (req, res) => {
     const totalLuas = farmersDb.reduce((acc, f) => acc + (f.luasLahan || 0), 0).toFixed(1);
     const totalTon = farmersDb.reduce((acc, f) => acc + (f.estimasiHasilTon || 0), 0).toFixed(1);
-    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
-    const host = req.get("host") || "localhost:3000";
+    const protoRaw = String(req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
+    const protocol = protoRaw === "http" ? "http" : "https";
+    const host = cleanHost(req.get("host"));
     const fullCsvUrl = `${protocol}://${host}/api/sheets/export.csv`;
 
     const rowsHtml = farmersDb
       .map(
         (f, idx) => `
-      <tr class="farmer-row hover:bg-emerald-50/50 transition-colors" data-nama="${f.nama.toLowerCase()}" data-komoditas="${f.komoditas.toLowerCase()}" data-alamat="${f.alamat.toLowerCase()}">
+      <tr class="farmer-row hover:bg-emerald-50/50 transition-colors" data-nama="${escAttr((f.nama || "").toLowerCase())}" data-komoditas="${escAttr((f.komoditas || "").toLowerCase())}" data-alamat="${escAttr((f.alamat || "").toLowerCase())}">
         <td class="row-num select-none">${idx + 2}</td>
-        <td class="cell font-mono font-semibold text-emerald-800" data-col="A" data-row="${idx + 2}">${f.id}</td>
-        <td class="cell text-slate-500 font-mono text-xs" data-col="B" data-row="${idx + 2}">${f.timestamp}</td>
-        <td class="cell font-semibold text-slate-900" data-col="C" data-row="${idx + 2}">${f.nama}</td>
-        <td class="cell font-mono text-slate-700" data-col="D" data-row="${idx + 2}">${f.noHp}</td>
-        <td class="cell text-slate-700" data-col="E" data-row="${idx + 2}">${f.alamat}</td>
-        <td class="cell text-slate-700" data-col="F" data-row="${idx + 2}">${f.kabupaten || "—"}</td>
-        <td class="cell text-right font-mono font-bold text-emerald-900 bg-emerald-50/40" data-col="G" data-row="${idx + 2}">${f.luasLahan.toFixed(1)}</td>
-        <td class="cell font-medium text-slate-800" data-col="H" data-row="${idx + 2}">${f.komoditas}</td>
-        <td class="cell text-slate-600" data-col="I" data-row="${idx + 2}">${f.varietas || "—"}</td>
-        <td class="cell text-slate-700" data-col="J" data-row="${idx + 2}">${f.estimasiPanen}</td>
-        <td class="cell text-right font-mono font-bold text-amber-900 bg-amber-50/40" data-col="K" data-row="${idx + 2}">${f.estimasiHasilTon.toFixed(1)}</td>
-        <td class="cell text-center" data-col="L" data-row="${idx + 2}"><span class="badge">${f.statusVerifikasi}</span></td>
-        <td class="cell text-slate-600 max-w-sm truncate" data-col="M" data-row="${idx + 2}" title="${(f.catatanAI || "").replace(/"/g, "&quot;")}">${f.catatanAI || "—"}</td>
+        <td class="cell font-mono font-semibold text-emerald-800" data-col="A" data-row="${idx + 2}">${escHtml(f.id)}</td>
+        <td class="cell text-slate-500 font-mono text-xs" data-col="B" data-row="${idx + 2}">${escHtml(f.timestamp)}</td>
+        <td class="cell font-semibold text-slate-900" data-col="C" data-row="${idx + 2}">${escHtml(f.nama)}</td>
+        <td class="cell font-mono text-slate-700" data-col="D" data-row="${idx + 2}">${escHtml(f.noHp)}</td>
+        <td class="cell text-slate-700" data-col="E" data-row="${idx + 2}">${escHtml(f.alamat)}</td>
+        <td class="cell text-slate-700" data-col="F" data-row="${idx + 2}">${escHtml(f.kabupaten || "—")}</td>
+        <td class="cell text-right font-mono font-bold text-emerald-900 bg-emerald-50/40" data-col="G" data-row="${idx + 2}">${Number(f.luasLahan || 0).toFixed(1)}</td>
+        <td class="cell font-medium text-slate-800" data-col="H" data-row="${idx + 2}">${escHtml(f.komoditas)}</td>
+        <td class="cell text-slate-600" data-col="I" data-row="${idx + 2}">${escHtml(f.varietas || "—")}</td>
+        <td class="cell text-slate-700" data-col="J" data-row="${idx + 2}">${escHtml(f.estimasiPanen)}</td>
+        <td class="cell text-right font-mono font-bold text-amber-900 bg-amber-50/40" data-col="K" data-row="${idx + 2}">${Number(f.estimasiHasilTon || 0).toFixed(1)}</td>
+        <td class="cell text-center" data-col="L" data-row="${idx + 2}"><span class="badge">${escHtml(f.statusVerifikasi)}</span></td>
+        <td class="cell text-slate-600 max-w-sm truncate" data-col="M" data-row="${idx + 2}" title="${escAttr(f.catatanAI || "")}">${escHtml(f.catatanAI || "—")}</td>
       </tr>`
       )
       .join("\n");
@@ -3204,7 +3408,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     function showToast(msg) {
       const banner = document.getElementById('toastBanner');
       const text = document.getElementById('toastText');
-      text.innerHTML = msg;
+      text.textContent = String(msg || "").replace(/<[^>]*>/g, "");
       banner.classList.remove('hidden');
       setTimeout(() => banner.classList.add('hidden'), 5000);
     }
