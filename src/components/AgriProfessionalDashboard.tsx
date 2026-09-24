@@ -49,6 +49,7 @@ import {
   ComposedChart,
 } from 'recharts';
 import { FarmerRecord, MarketCommodity, StrategicRecommendation } from '../types';
+import { generateArchitecturePdf } from '../utils/generateArchitecturePdf';
 
 interface AgriProfessionalDashboardProps {
   farmers: FarmerRecord[];
@@ -518,6 +519,15 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
                 <span>Peta Google Maps</span>
               </button>
             )}
+
+            <button
+              onClick={generateArchitecturePdf}
+              className="px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold shadow-sm transition flex items-center space-x-1.5 cursor-pointer"
+              title="Unduh Dokumen Digital Arsitektur & Spesifikasi Teknis TaniAI (Format PDF)"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Arsitektur &amp; Spek (PDF)</span>
+            </button>
 
             <button
               onClick={() => setShowExecutiveBriefing(!showExecutiveBriefing)}

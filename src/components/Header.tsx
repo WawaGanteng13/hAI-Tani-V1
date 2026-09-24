@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sprout, MessageSquare, Table, TrendingUp, Cpu, Radio, BarChart3, MapPin } from 'lucide-react';
+import { Sprout, MessageSquare, Table, TrendingUp, Cpu, Radio, BarChart3, MapPin, FileText } from 'lucide-react';
 
 interface HeaderProps {
   activeTab: 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map';
@@ -7,6 +7,7 @@ interface HeaderProps {
   onOpenWebhookModal: () => void;
   onOpenAdminModal?: () => void;
   onOpenNineRouterModal?: () => void;
+  onOpenWhitepaperModal?: () => void;
   farmersCount: number;
   anomaliesCount: number;
   adminsCount?: number;
@@ -19,6 +20,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenWebhookModal,
   onOpenAdminModal,
   onOpenNineRouterModal,
+  onOpenWhitepaperModal,
   farmersCount,
   anomaliesCount,
   adminsCount = 3,
@@ -75,6 +77,17 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="font-mono bg-amber-900/90 text-amber-200 px-1.5 py-0.2 rounded font-bold">
                   {adminsCount}
                 </span>
+              </button>
+            )}
+
+            {onOpenWhitepaperModal && (
+              <button
+                onClick={onOpenWhitepaperModal}
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-purple-950/80 hover:bg-purple-900 text-purple-200 border border-purple-700/60 text-xs font-medium transition cursor-pointer shadow-xs"
+                title="Buka Dokumen Arsitektur & Unduh PDF Spesifikasi Teknis"
+              >
+                <FileText className="w-3.5 h-3.5 text-purple-300" />
+                <span className="hidden sm:inline">Arsitektur PDF</span>
               </button>
             )}
 

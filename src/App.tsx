@@ -11,6 +11,7 @@ import { AddFarmerModal } from './components/AddFarmerModal';
 import { AddSupplierModal } from './components/AddSupplierModal';
 import { AdminManagerModal } from './components/AdminManagerModal';
 import { NineRouterModal } from './components/NineRouterModal';
+import { TechnicalWhitepaperModal } from './components/TechnicalWhitepaperModal';
 import { FarmerRecord, MarketCommodity, AnomalyNotification, StrategicRecommendation, AdminUser, NineRouterStatus, SupplierRecord } from './types';
 import {
   INITIAL_FARMERS,
@@ -38,6 +39,7 @@ export default function App() {
   const [isAddSupplierModalOpen, setIsAddSupplierModalOpen] = useState(false);
   const [isAdminManagerOpen, setIsAdminManagerOpen] = useState(false);
   const [isNineRouterModalOpen, setIsNineRouterModalOpen] = useState(false);
+  const [isWhitepaperModalOpen, setIsWhitepaperModalOpen] = useState(false);
   const [nineRouterStatus, setNineRouterStatus] = useState<NineRouterStatus | null>(null);
   const [nineRouterLoading, setNineRouterLoading] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'warning' | 'info'; text: string } | null>(null);
@@ -291,6 +293,7 @@ export default function App() {
         onOpenWebhookModal={() => setIsWebhookModalOpen(true)}
         onOpenAdminModal={() => setIsAdminManagerOpen(true)}
         onOpenNineRouterModal={() => setIsNineRouterModalOpen(true)}
+        onOpenWhitepaperModal={() => setIsWhitepaperModalOpen(true)}
         farmersCount={farmers.length}
         anomaliesCount={anomaliesCount}
         adminsCount={admins.length}
@@ -429,6 +432,11 @@ export default function App() {
         status={nineRouterStatus}
         onRefresh={fetchNineRouterStatus}
         isLoading={nineRouterLoading}
+      />
+
+      <TechnicalWhitepaperModal
+        isOpen={isWhitepaperModalOpen}
+        onClose={() => setIsWhitepaperModalOpen(false)}
       />
     </div>
   );

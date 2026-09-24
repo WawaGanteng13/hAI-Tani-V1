@@ -57,17 +57,17 @@ export function generateArchitecturePdf() {
   doc.setFontSize(9);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(30, 41, 59);
-  doc.text('INFORMASI DOKUMEN', 20, 60);
+  doc.text('INFORMASI DOKUMEN & SPESIFIKASI TEKNIS TERBARU', 20, 60);
 
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(71, 85, 105);
   doc.text('• Judul Sistem : TaniAI - Conversational Agriculture Intelligence', 20, 66);
-  doc.text('• Versi Sistem : v2.5 Enterprise (Dual Role: Farmer & Admin PPL)', 20, 71);
-  doc.text('• Tanggal Rilis : September 2026 (Production Ready)', 20, 76);
+  doc.text('• Versi Arsitektur : v2.8 Enterprise Cloud (Production Ready)', 20, 71);
+  doc.text('• Tanggal Rilis : September 2026 (Live Workspace & Dual AI)', 20, 76);
 
-  doc.text('• Modul Inti   : Gemini AI, WhatsApp Engine, Google Sheets Sync', 110, 66);
-  doc.text('• Target Sektor : Dinas Pertanian, PPL, Koperasi & Petani Mitra', 110, 71);
-  doc.text('• Status Uji   : Verified & Passed Field Ingestion Tests', 110, 76);
+  doc.text('• Mesin AI     : 9Router Gateway (gpt-4.1) + Gemini 2.5 Fallback', 110, 66);
+  doc.text('• Sinkronisasi : 1P Google Workspace OAuth (Drive & Sheets API v4)', 110, 71);
+  doc.text('• Rantai Pasok : Geospatial Google Maps + Supplier Saprodi/Alsintan', 110, 76);
 
   currentY = 88;
 
@@ -150,23 +150,23 @@ export function generateArchitecturePdf() {
     body: [
       [
         'Layer 1: Ingestion & Presentation Layer',
-        '• WhatsApp Cloud API / Webhook Router\n• Web Executive Dashboard (React 19 + Tailwind CSS)\n• Audio Transcriber & Audio FX Engine',
-        'Menerima webhook pesan masuk (teks/voice note), menyajikan antarmuka visual data penyuluh & dinas, memutar efek audio status verifikasi.',
+        '• WhatsApp Cloud API / Webhook Router\n• Web Executive Dashboard (React 19 + Tailwind CSS)\n• Google Maps Geospatial Hub\n• Audio Transcriber & Audio FX Engine',
+        'Menerima webhook pesan masuk (teks/voice note), menyajikan antarmuka visual data penyuluh & dinas, memetakan sebaran lahan & supplier terdekat.',
       ],
       [
-        'Layer 2: Security & RBAC Gateway',
-        '• Express.js Server API Gateway\n• Phone Whitelist & Admin Role Verifier\n• Request Sanitizer & Rate Limiter',
-        'Memvalidasi nomor pengirim (apakah Petani Umum atau Admin PPL berwenang), melindungi endpoint API, dan mengelola hak akses sistem.',
+        'Layer 2: Security & Identity Gateway',
+        '• Express.js Server API Gateway\n• Phone Whitelist & Admin RBAC Verifier\n• 1P Google Workspace OAuth 2.0\n• In-Memory Token Cache & Security Gate',
+        'Memvalidasi nomor pengirim (Petani vs PPL Admin), mengotentikasi sesi Google Drive & Sheets melalui Firebase Auth 1P tanpa server redirect.',
       ],
       [
-        'Layer 3: AI Cognitive & Validation Engine',
-        '• Google Gemini 2.5 Multimodal SDK\n• NLP Natural Language Entity Extractor\n• 4-Tier Completeness State Machine\n• Fallback Rule Engine',
-        'Mengekstrak entitas Nama, Komoditas, Luas Lahan, dan Lokasi. Menahan data di draf percakapan jika belum lengkap, memandu perbaikan via prompt santai.',
+        'Layer 3: Dual-Core AI Cognitive Engine',
+        '• Primary: 9Router AI Gateway (gpt-4.1)\n• Fallback: Google Gemini 2.5 Flash SDK\n• NLP Natural Language Entity Extractor\n• 4-Tier Completeness State Machine',
+        'Mengekstrak entitas Nama, Komoditas, Luas Lahan, dan Lokasi. Failover cerdas berkecepatan tinggi dalam hitungan milidetik jika gateway sibuk.',
       ],
       [
         'Layer 4: Storage & Analytical Sync Layer',
-        '• In-Memory / SQLite Transactional DB\n• Google Sheets V4 API Two-Way Sync\n• Early Supply Anomaly Calculator\n• Broadcast Push Notification Queue',
-        'Menyimpan catatan petani permanen dengan ID TANI-xxx, mencatat langsung ke baris spreadsheet aktif, dan menghitung proyeksi panen tonase pangan.',
+        '• Persistent Transactional DB (JSON Store)\n• Google Drive v3 & Google Sheets v4 API\n• Supply Chain Matcher (Saprodi & Alsintan)\n• Early Supply Anomaly Calculator',
+        'Menyimpan catatan petani (TANI-xxx) & supplier (SUP-xxx), menulis langsung ke baris Google Sheets pengguna via OAuth, kalkulasi defisit pangan.',
       ],
     ],
     theme: 'grid',
@@ -239,11 +239,11 @@ export function generateArchitecturePdf() {
   doc.setFontSize(7.5);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(67, 56, 202);
-  doc.text('3. Cognitive Engine', x3 + 4, currentY + 6);
+  doc.text('3. Dual AI Engine', x3 + 4, currentY + 6);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(6.5);
   doc.setTextColor(51, 65, 85);
-  doc.text('Gemini 2.5 + Validator', x3 + 4, currentY + 11);
+  doc.text('9Router (gpt-4.1) + Gemini', x3 + 4, currentY + 11);
   doc.text('4-Tier Completeness Check', x3 + 4, currentY + 16);
 
   // Arrow 3 -> 4
@@ -257,12 +257,12 @@ export function generateArchitecturePdf() {
   doc.setFontSize(7.5);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(180, 83, 9);
-  doc.text('4. Cloud & Sheets', x4 + 4, currentY + 6);
+  doc.text('4. Drive & Sheets', x4 + 4, currentY + 6);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(6.5);
   doc.setTextColor(51, 65, 85);
-  doc.text('Google Sheets Sync V4', x4 + 4, currentY + 11);
-  doc.text('Dashboard Analitik Live', x4 + 4, currentY + 16);
+  doc.text('Google Workspace 1P OAuth', x4 + 4, currentY + 11);
+  doc.text('Drive v3 & Sheets v4 Sync', x4 + 4, currentY + 16);
 
   currentY += boxHeight + 10;
 
