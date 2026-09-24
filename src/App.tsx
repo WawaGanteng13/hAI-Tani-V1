@@ -5,32 +5,41 @@ import { WhatsAppChatbot } from './components/WhatsAppChatbot';
 import { GoogleSheetsView } from './components/GoogleSheetsView';
 import { MarketAnomalyView } from './components/MarketAnomalyView';
 import { DataScientistPortal } from './components/DataScientistPortal';
+import { FarmerSupplierMapView } from './components/FarmerSupplierMapView';
 import { WebhookModal } from './components/WebhookModal';
 import { AddFarmerModal } from './components/AddFarmerModal';
+import { AddSupplierModal } from './components/AddSupplierModal';
 import { AdminManagerModal } from './components/AdminManagerModal';
-import { FarmerRecord, MarketCommodity, AnomalyNotification, StrategicRecommendation, AdminUser } from './types';
+import { NineRouterModal } from './components/NineRouterModal';
+import { FarmerRecord, MarketCommodity, AnomalyNotification, StrategicRecommendation, AdminUser, NineRouterStatus, SupplierRecord } from './types';
 import {
   INITIAL_FARMERS,
   INITIAL_COMMODITIES,
   INITIAL_NOTIFICATIONS,
   INITIAL_STRATEGIC_RECOMMENDATION,
   INITIAL_ADMINS,
+  INITIAL_SUPPLIERS,
 } from './data/mockData';
 import { CheckCircle2, AlertTriangle, Info, X } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map'>('dashboard');
   const [farmers, setFarmers] = useState<FarmerRecord[]>(INITIAL_FARMERS);
   const [commodities, setCommodities] = useState<MarketCommodity[]>(INITIAL_COMMODITIES);
   const [notifications, setNotifications] = useState<AnomalyNotification[]>(INITIAL_NOTIFICATIONS);
   const [recommendation, setRecommendation] = useState<StrategicRecommendation>(INITIAL_STRATEGIC_RECOMMENDATION);
   const [admins, setAdmins] = useState<AdminUser[]>(INITIAL_ADMINS);
+  const [suppliers, setSuppliers] = useState<SupplierRecord[]>(INITIAL_SUPPLIERS);
 
   const [loading, setLoading] = useState(false);
   const [aiGenerating, setAiGenerating] = useState(false);
   const [isWebhookModalOpen, setIsWebhookModalOpen] = useState(false);
   const [isAddFarmerModalOpen, setIsAddFarmerModalOpen] = useState(false);
+  const [isAddSupplierModalOpen, setIsAddSupplierModalOpen] = useState(false);
   const [isAdminManagerOpen, setIsAdminManagerOpen] = useState(false);
+  const [isNineRouterModalOpen, setIsNineRouterModalOpen] = useState(false);
+  const [nineRouterStatus, setNineRouterStatus] = useState<NineRouterStatus | null>(null);
+  const [nineRouterLoading, setNineRouterLoading] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'warning' | 'info'; text: string } | null>(null);
 
   const showToast = (text: string, type: 'success' | 'warning' | 'info' = 'success') => {
@@ -38,17 +47,35 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 4000);
   };
 
+  const fetchNineRouterStatus = async () => {
+    setNineRouterLoading(true);
+    try {
+      const res = await fetch('/api/9router/status');
+      if (res.ok) {
+        const data = await res.json();
+        setNineRouterStatus(data);
+      }
+    } catch (e) {
+      console.error('Error fetching 9router status:', e);
+    } finally {
+      setNineRouterLoading(false);
+    }
+  };
+
   // Fetch initial data from server
   const loadData = async () => {
     setLoading(true);
     try {
-      const [fRes, cRes, nRes, rRes, aRes] = await Promise.all([
+      const [fRes, cRes, nRes, rRes, aRes, sRes] = await Promise.all([
         fetch('/api/farmers'),
         fetch('/api/commodities'),
         fetch('/api/notifications'),
         fetch('/api/strategic-recommendation'),
         fetch('/api/admins'),
+        fetch('/api/suppliers'),
       ]);
+
+      fetchNineRouterStatus();
 
       if (fRes.ok) {
         const fData = await fRes.json();
@@ -69,6 +96,10 @@ export default function App() {
       if (aRes.ok) {
         const aData = await aRes.json();
         if (Array.isArray(aData) && aData.length > 0) setAdmins(aData);
+      }
+      if (sRes.ok) {
+        const sData = await sRes.json();
+        if (Array.isArray(sData) && sData.length > 0) setSuppliers(sData);
       }
     } catch (err) {
       console.error('Error fetching data:', err);
@@ -153,6 +184,42 @@ export default function App() {
     }
   };
 
+  // Handle supplier registered via WhatsApp or modal
+  const handleSupplierRegistered = (newRecord: SupplierRecord) => {
+    setSuppliers((prev) => [newRecord, ...prev.filter((s) => s.id !== newRecord.id)]);
+    showToast(`Supplier ${newRecord.nama} (${newRecord.kategori}) berhasil disimpan ke Lembar 2 Google Sheets!`, 'success');
+  };
+
+  // Handle manual supplier addition
+  const handleAddSupplierManual = async (supplierData: Partial<SupplierRecord>) => {
+    try {
+      const res = await fetch('/api/suppliers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(supplierData),
+      });
+      if (res.ok) {
+        const newRecord = await res.json();
+        setSuppliers((prev) => [newRecord, ...prev]);
+        showToast(`Supplier ${newRecord.nama} berhasil ditambahkan ke Lembar 2 Google Sheets.`, 'success');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('Gagal menyimpan data supplier.', 'warning');
+    }
+  };
+
+  // Handle supplier delete
+  const handleDeleteSupplier = async (id: string) => {
+    try {
+      await fetch(`/api/suppliers/${id}`, { method: 'DELETE' });
+      setSuppliers((prev) => prev.filter((s) => s.id !== id));
+      showToast(`Data supplier ${id} berhasil dihapus dari Google Sheets.`, 'info');
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   // Handle price update / anomaly trigger
   const handleUpdateCommodityPrice = async (id: string, newPrice: number, reason: string) => {
     try {
@@ -223,9 +290,11 @@ export default function App() {
         setActiveTab={setActiveTab}
         onOpenWebhookModal={() => setIsWebhookModalOpen(true)}
         onOpenAdminModal={() => setIsAdminManagerOpen(true)}
+        onOpenNineRouterModal={() => setIsNineRouterModalOpen(true)}
         farmersCount={farmers.length}
         anomaliesCount={anomaliesCount}
         adminsCount={admins.length}
+        nineRouterActive={!!nineRouterStatus?.healthy}
       />
 
       {/* Floating Toast Notification */}
@@ -259,7 +328,7 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      <main className="flex-1 px-4 sm:px-6 lg:px-8 py-4">
+      <main className={activeTab === 'map' ? 'flex-1 p-0 overflow-hidden' : 'flex-1 px-4 sm:px-6 lg:px-8 py-4'}>
         {activeTab === 'dashboard' && (
           <AgriProfessionalDashboard
             farmers={farmers}
@@ -269,23 +338,30 @@ export default function App() {
             loading={loading}
             onNavigateToSheets={() => setActiveTab('sheets')}
             onNavigateToChat={() => setActiveTab('chat')}
+            onNavigateToMap={() => setActiveTab('map')}
           />
         )}
 
         {activeTab === 'chat' && (
           <WhatsAppChatbot
             onFarmerRegistered={handleFarmerRegistered}
+            onSupplierRegistered={handleSupplierRegistered}
             onNavigateToSheets={() => setActiveTab('sheets')}
             admins={admins}
             onOpenAdminManager={() => setIsAdminManagerOpen(true)}
+            nineRouterStatus={nineRouterStatus}
+            onOpenNineRouterModal={() => setIsNineRouterModalOpen(true)}
           />
         )}
 
         {activeTab === 'sheets' && (
           <GoogleSheetsView
             farmers={farmers}
+            suppliers={suppliers}
             onAddFarmer={() => setIsAddFarmerModalOpen(true)}
+            onAddSupplier={() => setIsAddSupplierModalOpen(true)}
             onDeleteFarmer={handleDeleteFarmer}
+            onDeleteSupplier={handleDeleteSupplier}
             onRefresh={loadData}
             loading={loading}
           />
@@ -310,6 +386,15 @@ export default function App() {
             loading={aiGenerating}
           />
         )}
+
+        {activeTab === 'map' && (
+          <FarmerSupplierMapView
+            farmers={farmers}
+            suppliers={suppliers}
+            onRefreshData={loadData}
+            onAddFarmerClick={() => setIsAddFarmerModalOpen(true)}
+          />
+        )}
       </main>
 
       {/* Modals */}
@@ -324,12 +409,26 @@ export default function App() {
         onAdd={handleAddFarmerManual}
       />
 
+      <AddSupplierModal
+        isOpen={isAddSupplierModalOpen}
+        onClose={() => setIsAddSupplierModalOpen(false)}
+        onAdd={handleAddSupplierManual}
+      />
+
       <AdminManagerModal
         isOpen={isAdminManagerOpen}
         onClose={() => setIsAdminManagerOpen(false)}
         admins={admins}
         onAddAdmin={handleAddAdmin}
         onDeleteAdmin={handleDeleteAdmin}
+      />
+
+      <NineRouterModal
+        isOpen={isNineRouterModalOpen}
+        onClose={() => setIsNineRouterModalOpen(false)}
+        status={nineRouterStatus}
+        onRefresh={fetchNineRouterStatus}
+        isLoading={nineRouterLoading}
       />
     </div>
   );

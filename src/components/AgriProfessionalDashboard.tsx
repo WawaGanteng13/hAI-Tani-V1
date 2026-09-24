@@ -58,6 +58,7 @@ interface AgriProfessionalDashboardProps {
   loading: boolean;
   onNavigateToSheets: () => void;
   onNavigateToChat: () => void;
+  onNavigateToMap?: () => void;
 }
 
 const PALETTE = {
@@ -81,6 +82,7 @@ export const AgriProfessionalDashboard: React.FC<AgriProfessionalDashboardProps>
   loading,
   onNavigateToSheets,
   onNavigateToChat,
+  onNavigateToMap,
 }) => {
   // Filter States
   const [selectedCommodity, setSelectedCommodity] = useState<string>('all');
@@ -505,6 +507,17 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
               <Download className="w-3.5 h-3.5" />
               <span>Ekspor CSV</span>
             </button>
+
+            {onNavigateToMap && (
+              <button
+                onClick={onNavigateToMap}
+                className="px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold shadow-sm transition flex items-center space-x-1.5 cursor-pointer"
+                title="Buka Peta Spasial Sebaran Petani & Supplier di Google Maps"
+              >
+                <MapPin className="w-3.5 h-3.5" />
+                <span>Peta Google Maps</span>
+              </button>
+            )}
 
             <button
               onClick={() => setShowExecutiveBriefing(!showExecutiveBriefing)}

@@ -1,14 +1,16 @@
 import React from 'react';
-import { Sprout, MessageSquare, Table, TrendingUp, Cpu, Radio, BarChart3 } from 'lucide-react';
+import { Sprout, MessageSquare, Table, TrendingUp, Cpu, Radio, BarChart3, MapPin } from 'lucide-react';
 
 interface HeaderProps {
-  activeTab: 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist';
-  setActiveTab: (tab: 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist') => void;
+  activeTab: 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map';
+  setActiveTab: (tab: 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map') => void;
   onOpenWebhookModal: () => void;
   onOpenAdminModal?: () => void;
+  onOpenNineRouterModal?: () => void;
   farmersCount: number;
   anomaliesCount: number;
   adminsCount?: number;
+  nineRouterActive?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -16,9 +18,11 @@ export const Header: React.FC<HeaderProps> = ({
   setActiveTab,
   onOpenWebhookModal,
   onOpenAdminModal,
+  onOpenNineRouterModal,
   farmersCount,
   anomaliesCount,
   adminsCount = 3,
+  nineRouterActive = false,
 }) => {
   return (
     <header className="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-40 shadow-sm">
@@ -44,6 +48,22 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Quick status & Webhook action & Admin RBAC */}
           <div className="flex items-center space-x-2 sm:space-x-3">
+            {onOpenNineRouterModal && (
+              <button
+                onClick={onOpenNineRouterModal}
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 border border-indigo-700/60 text-xs font-medium transition cursor-pointer shadow-xs"
+                title="Status Integrasi 9Router AI Gateway"
+              >
+                <Cpu className={`w-3.5 h-3.5 ${nineRouterActive ? 'text-indigo-400 animate-pulse' : 'text-slate-400'}`} />
+                <span className="hidden sm:inline">9Router:</span>
+                <span className={`font-mono px-1.5 py-0.2 rounded font-bold text-[11px] ${
+                  nineRouterActive ? 'bg-indigo-900 text-indigo-200' : 'bg-slate-800 text-slate-400'
+                }`}>
+                  {nineRouterActive ? 'Gateway' : 'Failover'}
+                </span>
+              </button>
+            )}
+
             {onOpenAdminModal && (
               <button
                 onClick={onOpenAdminModal}
@@ -152,6 +172,21 @@ export const Header: React.FC<HeaderProps> = ({
             <span>Portal Data Scientist & Rekomendasi</span>
             <span className="bg-indigo-900/80 text-indigo-200 text-[10px] px-1.5 py-0.2 rounded-full font-mono">
               AI
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('map')}
+            className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition whitespace-nowrap cursor-pointer ${
+              activeTab === 'map'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-700/20'
+                : 'text-slate-300 hover:text-white hover:bg-slate-800'
+            }`}
+          >
+            <MapPin className="w-4 h-4 text-emerald-300" />
+            <span>Peta Sebaran Petani & Supplier</span>
+            <span className="bg-emerald-500/30 text-emerald-300 text-[10px] px-1.5 py-0.2 rounded-full font-mono font-semibold">
+              Maps
             </span>
           </button>
         </div>

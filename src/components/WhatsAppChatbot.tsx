@@ -30,24 +30,34 @@ import {
   Save,
   Edit3,
   PlusCircle,
+  Cpu,
+  Store,
+  Building2,
+  PackageCheck,
 } from 'lucide-react';
-import { ChatMessage, FarmerRecord, AdminUser } from '../types';
+import { ChatMessage, FarmerRecord, SupplierRecord, AdminUser, NineRouterStatus } from '../types';
 import { WhatsAppFormattedText } from './WhatsAppFormattedText';
 import { WhatsAppVoiceNotePlayer } from './WhatsAppVoiceNotePlayer';
 import { soundFx } from '../utils/audio';
 
 interface WhatsAppChatbotProps {
   onFarmerRegistered: (record: FarmerRecord) => void;
+  onSupplierRegistered?: (record: SupplierRecord) => void;
   onNavigateToSheets: () => void;
   admins?: AdminUser[];
   onOpenAdminManager?: () => void;
+  nineRouterStatus?: NineRouterStatus | null;
+  onOpenNineRouterModal?: () => void;
 }
 
 export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
   onFarmerRegistered,
+  onSupplierRegistered,
   onNavigateToSheets,
   admins = [],
   onOpenAdminManager,
+  nineRouterStatus,
+  onOpenNineRouterModal,
 }) => {
   // Sender phone for WhatsApp simulation
   const [senderPhone, setSenderPhone] = useState('+62 812-3456-7890'); // Default to Super Admin for easy first-look
@@ -88,10 +98,192 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
   const [loading, setLoading] = useState(false);
   const [draftFarmer, setDraftFarmer] = useState<Partial<FarmerRecord>>({});
   const [lastSaved, setLastSaved] = useState<FarmerRecord | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
+  const [draftSupplier, setDraftSupplier] = useState<Partial<SupplierRecord>>({});
+  const [lastSavedSupplier, setLastSavedSupplier] = useState<SupplierRecord | null>(null);
+  const [activeDraftTab, setActiveDraftTab] = useState<'farmer' | 'supplier'>('farmer');
   const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [isSavingSupplierDraft, setIsSavingSupplierDraft] = useState(false);
   const [showEditDraft, setShowEditDraft] = useState(false);
+  const [showEditSupplierDraft, setShowEditSupplierDraft] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // AI Cost Optimizer & Cancellation Controller
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
+  const [aiMetrics, setAiMetrics] = useState<{
+    totalCacheHits: number;
+    totalTokensSavedEstimate: number;
+    cachedItemsCount: number;
+    maxOutputTokensLimit: number;
+    activeProvider?: string;
+  }>({
+    totalCacheHits: 0,
+    totalTokensSavedEstimate: 0,
+    cachedItemsCount: 0,
+    maxOutputTokensLimit: 550,
+  });
+
+  const fetchAiMetrics = async () => {
+    try {
+      const res = await fetch('/api/ai/metrics');
+      if (res.ok) {
+        const data = await res.json();
+        setAiMetrics(data);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    fetchAiMetrics();
+    const interval = setInterval(fetchAiMetrics, 8000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleCancelGeneration = async () => {
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+      activeAbortControllerRef.current = null;
+    }
+    setLoading(false);
+    try {
+      await fetch('/api/chat/cancel', { method: 'POST' });
+    } catch {}
+
+    const cancelNotice: ChatMessage = {
+      id: `bot-cancel-${Date.now()}`,
+      sender: 'bot',
+      text: '🛑 *Proses AI Berhasil Dihentikan*\n\nEksekusi model dihentikan seketika untuk menghemat kuota token & memangkas biaya komputasi AI.',
+      timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+      quickReplies: ['Tanya Ringkasan Cepat', 'Cek Harga Pasar', 'Buka Google Sheets'],
+    };
+    setMessages((prev) => [...prev, cancelNotice]);
+    fetchAiMetrics();
+  };
+
+  // Live Real-Microphone Recording State
+  const [isRealRecording, setIsRealRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<any>(null);
+
+  const startRealRecording = async () => {
+    try {
+      setRecordingError(null);
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setRecordingError('Browser Anda tidak mendukung perekaman audio langsung.');
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        stream.getTracks().forEach((track) => track.stop());
+        await processRecordedAudio(audioBlob, recordSeconds);
+      };
+
+      mediaRecorder.start(250);
+      setIsRealRecording(true);
+      setRecordSeconds(0);
+      if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+      recordTimerRef.current = setInterval(() => {
+        setRecordSeconds((s) => s + 1);
+      }, 1000);
+    } catch (err: any) {
+      console.error('Mic access error:', err);
+      setRecordingError('Izin mikrofon ditolak atau tidak tersedia. Silakan gunakan simulasi voice note di bawah.');
+    }
+  };
+
+  const stopRealRecording = () => {
+    if (recordTimerRef.current) {
+      clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    setIsRealRecording(false);
+  };
+
+  const cancelRealRecording = () => {
+    if (recordTimerRef.current) {
+      clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.ondataavailable = null;
+      mediaRecorderRef.current.onstop = null;
+      mediaRecorderRef.current.stop();
+    }
+    setIsRealRecording(false);
+    setRecordSeconds(0);
+  };
+
+  const processRecordedAudio = async (blob: Blob, durationSec: number) => {
+    const formattedDuration = `0:${durationSec < 10 ? '0' : ''}${durationSec}`;
+    setIsTranscribing(true);
+
+    try {
+      const reader = new FileReader();
+      reader.readAsDataURL(blob);
+      reader.onloadend = async () => {
+        const base64Data = (reader.result as string).split(',')[1];
+        try {
+          const res = await fetch('/api/audio-transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              audioBase64: base64Data,
+              mimeType: blob.type || 'audio/webm',
+            }),
+          });
+          const result = await res.json();
+          const transcript = result.transcription || 'Pesan suara berhasil direkam.';
+
+          if (result.extracted) {
+            setDraftFarmer((prev) => ({
+              ...prev,
+              ...Object.fromEntries(
+                Object.entries(result.extracted).filter(([_, v]) => v !== null && v !== undefined && v !== '')
+              ),
+            }));
+          }
+
+          handleSend(transcript, {
+            isVoiceNote: true,
+            duration: formattedDuration,
+            transcription: transcript,
+          });
+        } catch (apiErr) {
+          console.error('Audio transcription API error:', apiErr);
+          handleSend('Pesan suara berhasil direkam.', {
+            isVoiceNote: true,
+            duration: formattedDuration,
+            transcription: 'Pesan suara pengguna (audio diproses)',
+          });
+        } finally {
+          setIsTranscribing(false);
+        }
+      };
+    } catch (err) {
+      console.error('Process audio error:', err);
+      setIsTranscribing(false);
+    }
+  };
 
   const isDraftComplete = Boolean(
     draftFarmer.nama &&
@@ -173,6 +365,63 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
     }
   };
 
+  const handleSaveDraftSupplierToDatabase = async () => {
+    if (!draftSupplier.nama || !draftSupplier.kategori) {
+      alert('Harap lengkapi minimal Nama Toko dan Kategori Usaha Supplier!');
+      return;
+    }
+
+    setIsSavingSupplierDraft(true);
+    try {
+      const payload = {
+        nama: draftSupplier.nama,
+        kategori: draftSupplier.kategori || 'Pupuk & Saprodi',
+        kontak: draftSupplier.kontak || senderPhone || '+62 812-xxxx-xxxx',
+        alamat: draftSupplier.alamat || 'Jl. Sentra Pertanian Utama',
+        kabupaten: draftSupplier.kabupaten || 'Subang, Jawa Barat',
+        statusKemitraan: draftSupplier.statusKemitraan || (isSenderAdmin ? 'Terverifikasi Dinas' : 'Mitra Aktif'),
+        produkUnggulan:
+          Array.isArray(draftSupplier.produkUnggulan) && draftSupplier.produkUnggulan.length > 0
+            ? draftSupplier.produkUnggulan
+            : ['Pupuk & Saprodi Pertanian'],
+        stokTersedia: draftSupplier.stokTersedia || 'Tersedia',
+        radiusLayananKm: Number(draftSupplier.radiusLayananKm) || 25,
+        jamBuka: draftSupplier.jamBuka || '08.00 - 17.00 WIB',
+        petaniBinaanCount: Number(draftSupplier.petaniBinaanCount) || 12,
+        catatan: isSenderAdmin
+          ? `Disimpan langsung oleh Admin ${activeAdmin?.nama} via WhatsApp HUD ke Google Sheets.`
+          : `Disimpan via WhatsApp Chatbot ke Google Sheets.`,
+      };
+
+      const res = await fetch('/api/suppliers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        const saved: SupplierRecord = await res.json();
+        setLastSavedSupplier(saved);
+        onSupplierRegistered?.(saved);
+        if (soundEnabled) soundFx.playSuccessBeep();
+
+        const botMsg: ChatMessage = {
+          id: `bot-sup-saved-${Date.now()}`,
+          sender: 'bot',
+          text: `✅ *Data Supplier Produk Pertanian Berhasil Ditambahkan ke Google Sheets!*\n\n• *ID Mitra:* \`${saved.id}\`\n• *Nama Toko/Kios:* *${saved.nama}*\n• *Kategori:* *${saved.kategori}*\n• *Kontak WA:* ${saved.kontak}\n• *Wilayah:* ${saved.alamat}, ${saved.kabupaten}\n• *Produk Unggulan:* ${saved.produkUnggulan.join(', ')}\n• *Status Kemitraan:* 🟢 *${saved.statusKemitraan}*\n• *Baris Google Sheets:* Baris #${saved.googleSheetRow || 'baru'}\n\nData supplier kini otomatis terdaftar di Lembar 2 Google Sheets dan peta spasial GIS.`,
+          timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+          quickReplies: ['🏢 Rekap Supplier Mitra', '📊 Buka Database Sheets', '🌾 Daftarkan Lahan Petani'],
+        };
+        setMessages((prev) => [...prev, botMsg]);
+        setShowEditSupplierDraft(false);
+      }
+    } catch (err) {
+      console.error('Failed to save draft supplier:', err);
+    } finally {
+      setIsSavingSupplierDraft(false);
+    }
+  };
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -214,13 +463,18 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
     setShowVoiceMenu(false);
     setLoading(true);
 
+    const abortController = new AbortController();
+    activeAbortControllerRef.current = abortController;
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: abortController.signal,
         body: JSON.stringify({
           message: voiceOptions?.transcription || messageText,
           currentDraft: draftFarmer,
+          currentSupplierDraft: draftSupplier,
           senderPhone: senderPhone,
         }),
       });
@@ -234,12 +488,22 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
         timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
         quickReplies: data.quickReplies || ['Cek Harga Pasar', 'Lihat Google Sheets', 'Tanya Seputar Hama'],
         extractedData: data.extracted,
+        extractedSupplier: data.extractedSupplier,
+        entityType: data.entityType,
+        aiProvider: data.aiProvider,
+        aiModel: data.aiModel,
+        fromCache: data.fromCache,
+        tokensUsed: data.tokensUsed,
       };
 
       setMessages((prev) => [...prev, botMessage]);
 
       if (soundEnabled) {
         soundFx.playIncomingChime();
+      }
+
+      if (data.entityType === 'supplier' || data.extractedSupplier || data.savedSupplier) {
+        setActiveDraftTab('supplier');
       }
 
       if (data.extracted) {
@@ -255,7 +519,27 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
         setLastSaved(data.savedRecord);
         onFarmerRegistered(data.savedRecord);
       }
-    } catch (err) {
+
+      if (data.extractedSupplier) {
+        setDraftSupplier((prev) => ({
+          ...prev,
+          ...Object.fromEntries(
+            Object.entries(data.extractedSupplier).filter(([_, v]) => v !== null && v !== undefined && v !== '')
+          ),
+        }));
+      }
+
+      if (data.savedSupplier) {
+        setLastSavedSupplier(data.savedSupplier);
+        onSupplierRegistered?.(data.savedSupplier);
+      }
+
+      fetchAiMetrics();
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || abortController.signal.aborted) {
+        console.log('Permintaan AI dibatalkan oleh klien (hemat token).');
+        return;
+      }
       console.error('Failed to chat:', err);
       setMessages((prev) => [
         ...prev,
@@ -269,6 +553,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
       ]);
     } finally {
       setLoading(false);
+      activeAbortControllerRef.current = null;
     }
   };
 
@@ -309,6 +594,8 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
     ]);
     setDraftFarmer({});
     setLastSaved(null);
+    setDraftSupplier({});
+    setLastSavedSupplier(null);
   };
 
   return (
@@ -470,6 +757,25 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
             </div>
 
             <div className="flex items-center space-x-2 text-emerald-100">
+              {onOpenNineRouterModal && (
+                <button
+                  onClick={onOpenNineRouterModal}
+                  title="Klik untuk melihat status 9Router AI Gateway"
+                  className={`hidden sm:flex items-center space-x-1 px-2 py-1 rounded-full text-[11px] font-semibold transition cursor-pointer ${
+                    nineRouterStatus?.healthy
+                      ? 'bg-indigo-900/80 hover:bg-indigo-800 text-indigo-200 border border-indigo-400/40'
+                      : 'bg-emerald-800/80 hover:bg-emerald-700 text-emerald-200 border border-emerald-600/40'
+                  }`}
+                >
+                  <Cpu className="w-3 h-3" />
+                  <span>
+                    {nineRouterStatus?.healthy
+                      ? `9Router: ${nineRouterStatus.model || 'Active'}`
+                      : 'AI Gateway'}
+                  </span>
+                </button>
+              )}
+
               <button
                 onClick={() => setSoundEnabled(!soundEnabled)}
                 title={soundEnabled ? 'Matikan Suara Pesan' : 'Aktifkan Suara Pesan'}
@@ -527,9 +833,35 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
                   >
                     {/* Sender Tag */}
                     {isBot && (
-                      <div className="flex items-center space-x-1.5 mb-1 text-[11px] font-semibold text-emerald-700">
-                        <Bot className="w-3.5 h-3.5" />
-                        <span>Kang Tani AI</span>
+                      <div className="flex items-center justify-between space-x-2 mb-1">
+                        <div className="flex items-center space-x-1.5 text-[11px] font-semibold text-emerald-700">
+                          <Bot className="w-3.5 h-3.5" />
+                          <span>Kang Tani AI</span>
+                        </div>
+                        {msg.fromCache ? (
+                          <span
+                            className="text-[9px] font-mono px-1.5 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center space-x-1"
+                            title="Disajikan instan dari cache hasil (0 token digunakan, 100% hemat biaya)"
+                          >
+                            <span>⚡ Cache (0 Token)</span>
+                          </span>
+                        ) : msg.aiProvider && (
+                          <span
+                            className={`text-[9px] font-mono px-1.5 py-0.2 rounded font-medium ${
+                              msg.aiProvider === '9router'
+                                ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                                : msg.aiProvider === 'gemini'
+                                ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                : 'bg-slate-100 text-slate-600 border border-slate-200'
+                            }`}
+                          >
+                            {msg.aiProvider === '9router'
+                              ? `⚡ 9Router (${msg.aiModel || 'gpt-4o'})`
+                              : msg.aiProvider === 'gemini'
+                              ? `♊ Gemini (${msg.aiModel || 'flash'})`
+                              : '🌾 Agronomi Engine'}
+                          </span>
+                        )}
                       </div>
                     )}
 
@@ -591,11 +923,22 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
             })}
 
             {loading && (
-              <div className="flex items-center space-x-2 bg-white text-slate-600 px-3 py-2 rounded-xl text-xs shadow-xs w-max border border-slate-100">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-bounce" />
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-bounce [animation-delay:0.2s]" />
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-bounce [animation-delay:0.4s]" />
-                <span className="text-slate-500 italic">Kang Tani sedang memproses permintaan...</span>
+              <div className="flex items-center space-x-2.5 bg-white text-slate-700 px-3.5 py-2 rounded-xl text-xs shadow-xs w-max border border-slate-200">
+                <div className="flex items-center space-x-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-bounce" />
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-bounce [animation-delay:0.2s]" />
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-bounce [animation-delay:0.4s]" />
+                </div>
+                <span className="text-slate-600 italic">Kang Tani sedang memproses...</span>
+                <button
+                  type="button"
+                  onClick={handleCancelGeneration}
+                  className="ml-2 px-2 py-0.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded text-[11px] font-semibold flex items-center space-x-1 transition cursor-pointer active:scale-95"
+                  title="Hentikan proses AI sekarang untuk menghemat token dan biaya"
+                >
+                  <X className="w-3 h-3 text-rose-600" />
+                  <span>Hentikan (Hemat Token)</span>
+                </button>
               </div>
             )}
 
@@ -664,7 +1007,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
                     <Mic className="w-3.5 h-3.5" />
                   </div>
                   <span className="font-bold text-xs text-slate-800">
-                    Simulasi Pesan Suara Petani / Admin (Voice Note)
+                    Kirim Pesan Suara (Voice Note WhatsApp)
                   </span>
                 </div>
                 <button
@@ -673,6 +1016,61 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
                 >
                   <X className="w-4 h-4" />
                 </button>
+              </div>
+
+              {/* Real Mic Recorder Banner */}
+              <div className="mb-3 p-3 rounded-xl border border-emerald-300 bg-gradient-to-r from-emerald-50 to-teal-50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5">
+                <div className="flex items-center space-x-2.5">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold ${isRealRecording ? 'bg-rose-500 text-white animate-pulse' : 'bg-emerald-600 text-white'}`}>
+                    <Mic className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h5 className="font-bold text-xs text-slate-800">
+                      {isRealRecording ? `Merekam Suara: 0:${recordSeconds < 10 ? '0' : ''}${recordSeconds}` : 'Rekam Suara Asli (Mikrofon Perangkat)'}
+                    </h5>
+                    <p className="text-[11px] text-slate-600">
+                      {isRealRecording ? 'Bicara sekarang... (Nama, lokasi desa, komoditas, luas lahan)' : 'Didukung transkripsi audio otomatis & ekstraksi AI'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  {!isRealRecording ? (
+                    <button
+                      onClick={startRealRecording}
+                      disabled={isTranscribing}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center space-x-1.5 transition shadow-xs cursor-pointer disabled:opacity-50"
+                    >
+                      <Mic className="w-3.5 h-3.5" />
+                      <span>{isTranscribing ? 'Memproses...' : 'Mulai Rekam'}</span>
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        onClick={cancelRealRecording}
+                        className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-xs font-semibold transition cursor-pointer"
+                      >
+                        Batal
+                      </button>
+                      <button
+                        onClick={stopRealRecording}
+                        className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1 shadow-xs transition cursor-pointer"
+                      >
+                        <span>Selesai & Kirim</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {recordingError && (
+                <div className="mb-2 p-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11px]">
+                  {recordingError}
+                </div>
+              )}
+
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                Atau Pilih Contoh Simulasi Rekaman Petani:
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
@@ -789,20 +1187,51 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
               <Paperclip className="w-5 h-5" />
             </button>
 
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleSend();
-              }}
-              placeholder={
-                isSenderAdmin
-                  ? "Instruksikan apapun ke AI (analisis panen, draf broadcast, solusi harga, ekspor data)..."
-                  : "Ketik pesan (contoh: Pak Joko, sawah 2 Ha padi di Karawang, panen Nov)..."
-              }
-              className="flex-1 bg-white border border-slate-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 text-slate-800"
-            />
+            {isRealRecording ? (
+              <div className="flex-1 flex items-center justify-between bg-rose-50 border border-rose-300 rounded-full px-4 py-1.5 shadow-2xs">
+                <div className="flex items-center space-x-2 text-rose-700 font-mono text-xs font-bold">
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-ping"></span>
+                  <span>Merekam: 0:{recordSeconds < 10 ? '0' : ''}{recordSeconds}</span>
+                  <span className="text-[11px] text-slate-500 font-sans hidden sm:inline">(Bicara jelas ke mikrofon)</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <button
+                    type="button"
+                    onClick={cancelRealRecording}
+                    className="text-xs text-slate-500 hover:text-slate-800 px-2 py-1 rounded cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={stopRealRecording}
+                    className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-full text-xs font-bold shadow-xs cursor-pointer"
+                  >
+                    Kirim Suara
+                  </button>
+                </div>
+              </div>
+            ) : isTranscribing ? (
+              <div className="flex-1 flex items-center space-x-2 bg-emerald-50 border border-emerald-300 rounded-full px-4 py-2 text-xs text-emerald-800">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600" />
+                <span>Memproses rekaman audio & transkripsi Gemini AI...</span>
+              </div>
+            ) : (
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSend();
+                }}
+                placeholder={
+                  isSenderAdmin
+                    ? "Instruksikan apapun ke AI (analisis panen, draf broadcast, solusi harga, ekspor data)..."
+                    : "Ketik pesan (contoh: Pak Joko, sawah 2 Ha padi di Karawang, panen Nov)..."
+                }
+                className="flex-1 bg-white border border-slate-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 text-slate-800"
+              />
+            )}
 
             <button
               type="button"
@@ -817,19 +1246,90 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
               <Mic className="w-5 h-5" />
             </button>
 
-            <button
-              type="button"
-              onClick={() => handleSend()}
-              disabled={!input.trim() || loading}
-              className="bg-[#128C7E] hover:bg-[#075E54] text-white p-2.5 rounded-full shadow transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-            >
-              <Send className="w-4 h-4" />
-            </button>
+            {loading ? (
+              <button
+                type="button"
+                onClick={handleCancelGeneration}
+                className="bg-rose-600 hover:bg-rose-700 text-white p-2.5 rounded-full shadow transition cursor-pointer active:scale-95 flex items-center justify-center animate-pulse"
+                title="Hentikan proses AI sekarang (Hemat Biaya & Token)"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => handleSend()}
+                disabled={!input.trim()}
+                className="bg-[#128C7E] hover:bg-[#075E54] text-white p-2.5 rounded-full shadow transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
         {/* Right Column: Live Data Extraction HUD & Test Scenarios */}
         <div className="lg:col-span-4 flex flex-col space-y-4">
+          {/* AI Cost & Token Efficiency Card */}
+          <div className="bg-gradient-to-br from-emerald-50/80 via-teal-50/40 to-white rounded-2xl shadow-md border border-emerald-200/90 p-5">
+            <div className="flex items-center justify-between pb-3 border-b border-emerald-200/60">
+              <div className="flex items-center space-x-2">
+                <div className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center font-bold shadow-xs">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-xs text-slate-800 uppercase tracking-wide">
+                    Efisiensi Biaya & Token AI
+                  </h4>
+                  <p className="text-[11px] text-emerald-700 font-medium">
+                    Optimasi 3-Pilar Aktif
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold">
+                LEAN & FAST
+              </span>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2 text-center">
+              <div className="bg-white/80 p-2.5 rounded-xl border border-emerald-100 shadow-2xs">
+                <span className="text-[10px] text-slate-500 block">Cache Digunakan</span>
+                <span className="text-base font-extrabold text-emerald-700 font-mono">
+                  {aiMetrics.totalCacheHits}x
+                </span>
+                <span className="text-[9px] text-slate-400 block">0 token keluar</span>
+              </div>
+              <div className="bg-white/80 p-2.5 rounded-xl border border-emerald-100 shadow-2xs">
+                <span className="text-[10px] text-slate-500 block">Estimasi Token Dihemat</span>
+                <span className="text-base font-extrabold text-teal-700 font-mono">
+                  ~{aiMetrics.totalTokensSavedEstimate.toLocaleString("id-ID")}
+                </span>
+                <span className="text-[9px] text-slate-400 block">efisiensi biaya</span>
+              </div>
+            </div>
+
+            <div className="mt-3 space-y-2 text-xs">
+              <div className="flex items-start space-x-2 text-slate-700 bg-white/60 p-2 rounded-lg border border-emerald-100">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                <span className="text-[11px]">
+                  <strong>1. Konteks Selektif Ringkas:</strong> Hanya data relevan & ringkasan yang dikirim, bukan tumpukan database utuh.
+                </span>
+              </div>
+              <div className="flex items-start space-x-2 text-slate-700 bg-white/60 p-2 rounded-lg border border-emerald-100">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                <span className="text-[11px]">
+                  <strong>2. Pembatasan & Pembatalan:</strong> Output dibatasi 550 token dan tombol Stop menghentikan proses seketika.
+                </span>
+              </div>
+              <div className="flex items-start space-x-2 text-slate-700 bg-white/60 p-2 rounded-lg border border-emerald-100">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                <span className="text-[11px]">
+                  <strong>3. Memori Cache Otomatis:</strong> Hasil laporan/jawaban disimpan dan digunakan kembali tanpa memanggil AI berulang.
+                </span>
+              </div>
+            </div>
+          </div>
+
           {/* Active Authority HUD */}
           <div className="bg-white rounded-2xl shadow-md border border-slate-200 p-5">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
@@ -909,6 +1409,21 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
                   </div>
                   <div className="text-[11px] text-emerald-800/80 mt-0.5">
                     Admin mendaftarkan petani langsung via chat dan tersinkronkan ke Google Sheets secara instan.
+                  </div>
+                </button>
+
+                <button
+                  onClick={() =>
+                    handleSend('Tani AI, tolong daftarkan supplier produk pertanian mitra baru: Kios Tani Berkah Makmur di Subang, kontak WA 081299887711, kategori Pupuk & Saprodi, produk unggulan: Pupuk Urea Petro, NPK Phonska Plus, Benih Ciherang, stok tersedia 20 Ton.')
+                  }
+                  className="w-full text-left p-2.5 rounded-xl border border-blue-300 bg-blue-50/70 hover:bg-blue-100/90 text-xs text-slate-800 transition cursor-pointer"
+                >
+                  <div className="font-bold text-blue-900 flex items-center space-x-1.5">
+                    <Store className="w-3.5 h-3.5 text-blue-700" />
+                    <span>🏢 Daftarkan Supplier Saprodi Baru (Admin)</span>
+                  </div>
+                  <div className="text-[11px] text-blue-800/80 mt-0.5">
+                    Admin mendaftarkan toko pupuk / distributor saprodi langsung ke Lembar 2 Google Sheets.
                   </div>
                 </button>
 
@@ -1033,205 +1548,473 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
                     Konsultasi harga pasar & rekomendasi pemupukan tetap terbuka untuk semua.
                   </div>
                 </button>
+
+                <button
+                  onClick={() =>
+                    handleSend('Halo Kang Tani, saya mau daftarkan toko saprodi pertanian: Toko Tani Maju di Karawang, kontak WA 081388776655, kategori Pupuk & Saprodi, produk unggulan NPK Kebomas dan Benih Padi Inpari 32, stok 15 ton.')
+                  }
+                  className="w-full text-left p-2.5 rounded-xl border border-blue-200 hover:border-blue-400 hover:bg-blue-50/60 text-xs text-slate-800 transition cursor-pointer"
+                >
+                  <div className="font-semibold text-blue-800 flex items-center space-x-1.5">
+                    <Store className="w-3.5 h-3.5 text-blue-600" />
+                    <span>🏪 Daftarkan Usaha Kios / Supplier Pertanian</span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">
+                    Kios atau distributor mendaftarkan nomor kontak, katalog produk, dan stok via WhatsApp.
+                  </div>
+                </button>
               </div>
             )}
           </div>
 
           {/* Real-Time Extraction HUD Card */}
           <div className="bg-white rounded-2xl shadow-md border border-slate-200 p-5">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center space-x-2">
-                <div className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center">
-                  <Sparkles className="w-4 h-4" />
-                </div>
-                <div>
-                  <h4 className="font-bold text-sm text-slate-800">Ekstraksi Otomatis AI</h4>
-                  <p className="text-[11px] text-slate-500">Mendeteksi entitas dari chat WhatsApp</p>
-                </div>
-              </div>
-              <span
-                className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                  isDraftComplete
-                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                    : 'bg-amber-50 text-amber-700 border-amber-200'
+            {/* Draft Mode Selector Tabs */}
+            <div className="flex rounded-xl bg-slate-100 p-1 mb-4">
+              <button
+                onClick={() => setActiveDraftTab('farmer')}
+                className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center justify-center space-x-1.5 ${
+                  activeDraftTab === 'farmer'
+                    ? 'bg-white text-emerald-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                {isDraftComplete ? '🟢 Data Lengkap' : '🟡 Draf Belum Lengkap'}
-              </span>
+                <span>🧑‍🌾 Draf Petani</span>
+                {draftFarmer.nama && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+              </button>
+              <button
+                onClick={() => setActiveDraftTab('supplier')}
+                className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center justify-center space-x-1.5 ${
+                  activeDraftTab === 'supplier'
+                    ? 'bg-white text-blue-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <span>🏢 Draf Supplier</span>
+                {draftSupplier.nama && <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
+              </button>
             </div>
 
-            {/* Completeness Checklist Indicators */}
-            <div className="grid grid-cols-2 gap-1.5 mt-2.5 p-2 bg-slate-50 rounded-xl text-[11px]">
-              <div className="flex items-center space-x-1">
-                <span className={draftFarmer.nama ? 'text-emerald-600 font-bold' : 'text-slate-400'}>
-                  {draftFarmer.nama ? '✓' : '○'}
-                </span>
-                <span className={draftFarmer.nama ? 'text-slate-700 font-medium' : 'text-slate-400'}>Nama Petani</span>
-              </div>
-              <div className="flex items-center space-x-1">
-                <span className={draftFarmer.komoditas ? 'text-emerald-600 font-bold' : 'text-slate-400'}>
-                  {draftFarmer.komoditas ? '✓' : '○'}
-                </span>
-                <span className={draftFarmer.komoditas ? 'text-slate-700 font-medium' : 'text-slate-400'}>Komoditas</span>
-              </div>
-              <div className="flex items-center space-x-1">
-                <span className={draftFarmer.luasLahan && Number(draftFarmer.luasLahan) > 0 ? 'text-emerald-600 font-bold' : 'text-slate-400'}>
-                  {draftFarmer.luasLahan && Number(draftFarmer.luasLahan) > 0 ? '✓' : '○'}
-                </span>
-                <span className={draftFarmer.luasLahan && Number(draftFarmer.luasLahan) > 0 ? 'text-slate-700 font-medium' : 'text-slate-400'}>Luas Lahan</span>
-              </div>
-              <div className="flex items-center space-x-1">
-                <span className={draftFarmer.kabupaten || draftFarmer.alamat ? 'text-emerald-600 font-bold' : 'text-slate-400'}>
-                  {draftFarmer.kabupaten || draftFarmer.alamat ? '✓' : '○'}
-                </span>
-                <span className={draftFarmer.kabupaten || draftFarmer.alamat ? 'text-slate-700 font-medium' : 'text-slate-400'}>Lokasi Wilayah</span>
-              </div>
-            </div>
-
-            {showEditDraft ? (
-              <div className="mt-3 space-y-2 text-xs">
-                <div>
-                  <label className="text-[11px] text-slate-500 block mb-0.5">Nama Petani:</label>
-                  <input
-                    type="text"
-                    value={draftFarmer.nama || ''}
-                    onChange={(e) => setDraftFarmer((prev) => ({ ...prev, nama: e.target.value }))}
-                    placeholder="Contoh: Pak Suparman"
-                    className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[11px] text-slate-500 block mb-0.5">Komoditas:</label>
-                    <input
-                      type="text"
-                      value={draftFarmer.komoditas || ''}
-                      onChange={(e) => setDraftFarmer((prev) => ({ ...prev, komoditas: e.target.value }))}
-                      placeholder="Jagung / Padi / Cabai"
-                      className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
-                    />
+            {activeDraftTab === 'farmer' ? (
+              /* FARMER DRAFT CARD */
+              <div>
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div className="flex items-center space-x-2">
+                    <div className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center">
+                      <Sparkles className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-sm text-slate-800">Ekstraksi Otomatis AI (Petani)</h4>
+                      <p className="text-[11px] text-slate-500">Mendeteksi data lahan & komoditas dari chat</p>
+                    </div>
                   </div>
-                  <div>
-                    <label className="text-[11px] text-slate-500 block mb-0.5">Luas Lahan (Ha):</label>
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={draftFarmer.luasLahan || ''}
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value) || 0;
-                        setDraftFarmer((prev) => ({
-                          ...prev,
-                          luasLahan: val,
-                          luasLahanFormatted: `${val} Ha`,
-                          estimasiHasilTon: Number((val * 6).toFixed(1)),
-                        }));
+                  <span
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                      isDraftComplete
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : 'bg-amber-50 text-amber-700 border-amber-200'
+                    }`}
+                  >
+                    {isDraftComplete ? '🟢 Data Lengkap' : '🟡 Draf Belum Lengkap'}
+                  </span>
+                </div>
+
+                {/* Completeness Checklist Indicators */}
+                <div className="grid grid-cols-2 gap-1.5 mt-2.5 p-2 bg-slate-50 rounded-xl text-[11px]">
+                  <div className="flex items-center space-x-1">
+                    <span className={draftFarmer.nama ? 'text-emerald-600 font-bold' : 'text-slate-400'}>
+                      {draftFarmer.nama ? '✓' : '○'}
+                    </span>
+                    <span className={draftFarmer.nama ? 'text-slate-700 font-medium' : 'text-slate-400'}>Nama Petani</span>
+                  </div>
+                  <div className="flex items-center space-x-1">
+                    <span className={draftFarmer.komoditas ? 'text-emerald-600 font-bold' : 'text-slate-400'}>
+                      {draftFarmer.komoditas ? '✓' : '○'}
+                    </span>
+                    <span className={draftFarmer.komoditas ? 'text-slate-700 font-medium' : 'text-slate-400'}>Komoditas</span>
+                  </div>
+                  <div className="flex items-center space-x-1">
+                    <span className={draftFarmer.luasLahan && Number(draftFarmer.luasLahan) > 0 ? 'text-emerald-600 font-bold' : 'text-slate-400'}>
+                      {draftFarmer.luasLahan && Number(draftFarmer.luasLahan) > 0 ? '✓' : '○'}
+                    </span>
+                    <span className={draftFarmer.luasLahan && Number(draftFarmer.luasLahan) > 0 ? 'text-slate-700 font-medium' : 'text-slate-400'}>Luas Lahan</span>
+                  </div>
+                  <div className="flex items-center space-x-1">
+                    <span className={draftFarmer.kabupaten || draftFarmer.alamat ? 'text-emerald-600 font-bold' : 'text-slate-400'}>
+                      {draftFarmer.kabupaten || draftFarmer.alamat ? '✓' : '○'}
+                    </span>
+                    <span className={draftFarmer.kabupaten || draftFarmer.alamat ? 'text-slate-700 font-medium' : 'text-slate-400'}>Lokasi Wilayah</span>
+                  </div>
+                </div>
+
+                {showEditDraft ? (
+                  <div className="mt-3 space-y-2 text-xs">
+                    <div>
+                      <label className="text-[11px] text-slate-500 block mb-0.5">Nama Petani:</label>
+                      <input
+                        type="text"
+                        value={draftFarmer.nama || ''}
+                        onChange={(e) => setDraftFarmer((prev) => ({ ...prev, nama: e.target.value }))}
+                        placeholder="Contoh: Pak Suparman"
+                        className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[11px] text-slate-500 block mb-0.5">Komoditas:</label>
+                        <input
+                          type="text"
+                          value={draftFarmer.komoditas || ''}
+                          onChange={(e) => setDraftFarmer((prev) => ({ ...prev, komoditas: e.target.value }))}
+                          placeholder="Jagung / Padi / Cabai"
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-slate-500 block mb-0.5">Luas Lahan (Ha):</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={draftFarmer.luasLahan || ''}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value) || 0;
+                            setDraftFarmer((prev) => ({
+                              ...prev,
+                              luasLahan: val,
+                              luasLahanFormatted: `${val} Ha`,
+                              estimasiHasilTon: Number((val * 6).toFixed(1)),
+                            }));
+                          }}
+                          placeholder="1.5"
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[11px] text-slate-500 block mb-0.5">Kabupaten:</label>
+                        <input
+                          type="text"
+                          value={draftFarmer.kabupaten || ''}
+                          onChange={(e) => setDraftFarmer((prev) => ({ ...prev, kabupaten: e.target.value }))}
+                          placeholder="Subang"
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-slate-500 block mb-0.5">Estimasi Panen:</label>
+                        <input
+                          type="text"
+                          value={draftFarmer.estimasiPanen || ''}
+                          onChange={(e) => setDraftFarmer((prev) => ({ ...prev, estimasiPanen: e.target.value }))}
+                          placeholder="Desember 2026"
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-3 space-y-2 text-xs">
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Nama Petani:</span>
+                      <span className="font-semibold text-slate-800">{draftFarmer.nama || '—'}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Komoditas:</span>
+                      <span className="font-semibold text-slate-800">{draftFarmer.komoditas || '—'}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Luas Lahan:</span>
+                      <span className="font-semibold text-emerald-700">{draftFarmer.luasLahanFormatted || '—'}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Lokasi / Kabupaten:</span>
+                      <span className="font-semibold text-slate-700">{draftFarmer.kabupaten || draftFarmer.alamat || '—'}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Estimasi Panen:</span>
+                      <span className="font-semibold text-amber-700">{draftFarmer.estimasiPanen || '—'}</span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={handleSaveDraftToDatabase}
+                      disabled={isSavingDraft}
+                      className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center space-x-1.5 transition shadow-xs cursor-pointer ${
+                        isDraftComplete
+                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                          : 'bg-amber-600 hover:bg-amber-700 text-white'
+                      }`}
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      <span>
+                        {isSavingDraft
+                          ? 'Menyimpan ke Sheets...'
+                          : isDraftComplete
+                          ? 'Simpan Data Lengkap ke Google Sheets'
+                          : 'Lengkapi Draf Terlebih Dahulu'}
+                      </span>
+                    </button>
+
+                    <button
+                      onClick={() => setShowEditDraft(!showEditDraft)}
+                      className="px-2.5 py-2 border border-slate-200 hover:bg-slate-100 rounded-xl text-xs text-slate-600 font-medium transition cursor-pointer"
+                      title="Sesuaikan Form Data"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  {(!draftFarmer.nama && !draftFarmer.komoditas) && (
+                    <button
+                      onClick={() => {
+                        setDraftFarmer({
+                          nama: 'Pak Suparman',
+                          noHp: '+62 812-7788-9900',
+                          alamat: 'Desa Compreng RT 03/04',
+                          kabupaten: 'Subang',
+                          luasLahan: 2.5,
+                          luasLahanFormatted: '2.5 Ha (25.000 m²)',
+                          komoditas: 'Jagung Hibrida',
+                          varietas: 'Bisi 18',
+                          estimasiPanen: 'November 2026',
+                          estimasiHasilTon: 15.0,
+                        });
                       }}
-                      placeholder="1.5"
-                      className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[11px] text-slate-500 block mb-0.5">Kabupaten:</label>
-                    <input
-                      type="text"
-                      value={draftFarmer.kabupaten || ''}
-                      onChange={(e) => setDraftFarmer((prev) => ({ ...prev, kabupaten: e.target.value }))}
-                      placeholder="Subang"
-                      className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-slate-500 block mb-0.5">Estimasi Panen:</label>
-                    <input
-                      type="text"
-                      value={draftFarmer.estimasiPanen || ''}
-                      onChange={(e) => setDraftFarmer((prev) => ({ ...prev, estimasiPanen: e.target.value }))}
-                      placeholder="Desember 2026"
-                      className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-emerald-500"
-                    />
-                  </div>
+                      className="w-full py-1.5 px-2 bg-emerald-50/70 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-[11px] font-semibold flex items-center justify-center space-x-1 transition cursor-pointer"
+                    >
+                      <PlusCircle className="w-3 h-3 text-emerald-600" />
+                      <span>Isi Draf Contoh: Pak Suparman (Jagung 2.5 Ha)</span>
+                    </button>
+                  )}
                 </div>
               </div>
             ) : (
-              <div className="mt-3 space-y-2 text-xs">
-                <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
-                  <span className="text-slate-500">Nama Petani:</span>
-                  <span className="font-semibold text-slate-800">{draftFarmer.nama || '—'}</span>
+              /* SUPPLIER DRAFT CARD */
+              <div>
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div className="flex items-center space-x-2">
+                    <div className="w-7 h-7 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center">
+                      <Store className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-sm text-slate-800">Ekstraksi Otomatis AI (Supplier)</h4>
+                      <p className="text-[11px] text-slate-500">Mendeteksi profil kios & stok saprodi dari chat</p>
+                    </div>
+                  </div>
+                  <span
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                      draftSupplier.nama && draftSupplier.kategori
+                        ? 'bg-blue-50 text-blue-700 border-blue-200'
+                        : 'bg-amber-50 text-amber-700 border-amber-200'
+                    }`}
+                  >
+                    {draftSupplier.nama && draftSupplier.kategori ? '🟢 Data Lengkap' : '🟡 Draf Belum Lengkap'}
+                  </span>
                 </div>
-                <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
-                  <span className="text-slate-500">Komoditas:</span>
-                  <span className="font-semibold text-slate-800">{draftFarmer.komoditas || '—'}</span>
+
+                {/* Completeness Checklist Indicators */}
+                <div className="grid grid-cols-2 gap-1.5 mt-2.5 p-2 bg-slate-50 rounded-xl text-[11px]">
+                  <div className="flex items-center space-x-1">
+                    <span className={draftSupplier.nama ? 'text-blue-600 font-bold' : 'text-slate-400'}>
+                      {draftSupplier.nama ? '✓' : '○'}
+                    </span>
+                    <span className={draftSupplier.nama ? 'text-slate-700 font-medium' : 'text-slate-400'}>Nama Toko/Kios</span>
+                  </div>
+                  <div className="flex items-center space-x-1">
+                    <span className={draftSupplier.kategori ? 'text-blue-600 font-bold' : 'text-slate-400'}>
+                      {draftSupplier.kategori ? '✓' : '○'}
+                    </span>
+                    <span className={draftSupplier.kategori ? 'text-slate-700 font-medium' : 'text-slate-400'}>Kategori Usaha</span>
+                  </div>
+                  <div className="flex items-center space-x-1">
+                    <span className={draftSupplier.kontak ? 'text-blue-600 font-bold' : 'text-slate-400'}>
+                      {draftSupplier.kontak ? '✓' : '○'}
+                    </span>
+                    <span className={draftSupplier.kontak ? 'text-slate-700 font-medium' : 'text-slate-400'}>Kontak WA</span>
+                  </div>
+                  <div className="flex items-center space-x-1">
+                    <span className={draftSupplier.kabupaten || draftSupplier.alamat ? 'text-blue-600 font-bold' : 'text-slate-400'}>
+                      {draftSupplier.kabupaten || draftSupplier.alamat ? '✓' : '○'}
+                    </span>
+                    <span className={draftSupplier.kabupaten || draftSupplier.alamat ? 'text-slate-700 font-medium' : 'text-slate-400'}>Lokasi Wilayah</span>
+                  </div>
                 </div>
-                <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
-                  <span className="text-slate-500">Luas Lahan:</span>
-                  <span className="font-semibold text-emerald-700">{draftFarmer.luasLahanFormatted || '—'}</span>
-                </div>
-                <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
-                  <span className="text-slate-500">Lokasi / Kabupaten:</span>
-                  <span className="font-semibold text-slate-700">{draftFarmer.kabupaten || draftFarmer.alamat || '—'}</span>
-                </div>
-                <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
-                  <span className="text-slate-500">Estimasi Panen:</span>
-                  <span className="font-semibold text-amber-700">{draftFarmer.estimasiPanen || '—'}</span>
+
+                {showEditSupplierDraft ? (
+                  <div className="mt-3 space-y-2 text-xs">
+                    <div>
+                      <label className="text-[11px] text-slate-500 block mb-0.5">Nama Toko / Kios / Usaha:</label>
+                      <input
+                        type="text"
+                        value={draftSupplier.nama || ''}
+                        onChange={(e) => setDraftSupplier((prev) => ({ ...prev, nama: e.target.value }))}
+                        placeholder="Contoh: Kios Tani Berkah Makmur"
+                        className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-blue-500"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[11px] text-slate-500 block mb-0.5">Kategori Usaha:</label>
+                        <select
+                          value={draftSupplier.kategori || 'Pupuk & Saprodi'}
+                          onChange={(e) => setDraftSupplier((prev) => ({ ...prev, kategori: e.target.value as any }))}
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-blue-500"
+                        >
+                          <option value="Pupuk & Saprodi">Pupuk & Saprodi</option>
+                          <option value="Bibit & Benih">Bibit & Benih</option>
+                          <option value="Alat & Mesin Pertanian">Alat & Mesin Pertanian</option>
+                          <option value="Offtaker & Pengepul">Offtaker & Pengepul</option>
+                          <option value="Koperasi Tani">Koperasi Tani</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-slate-500 block mb-0.5">Kontak WhatsApp:</label>
+                        <input
+                          type="text"
+                          value={draftSupplier.kontak || ''}
+                          onChange={(e) => setDraftSupplier((prev) => ({ ...prev, kontak: e.target.value }))}
+                          placeholder="+62 812-xxxx-xxxx"
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-blue-500"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[11px] text-slate-500 block mb-0.5">Kabupaten / Kota:</label>
+                        <input
+                          type="text"
+                          value={draftSupplier.kabupaten || ''}
+                          onChange={(e) => setDraftSupplier((prev) => ({ ...prev, kabupaten: e.target.value }))}
+                          placeholder="Subang"
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-slate-500 block mb-0.5">Stok Tersedia:</label>
+                        <input
+                          type="text"
+                          value={draftSupplier.stokTersedia || ''}
+                          onChange={(e) => setDraftSupplier((prev) => ({ ...prev, stokTersedia: e.target.value }))}
+                          placeholder="20 Ton Urea"
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-blue-500"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-slate-500 block mb-0.5">Produk Unggulan (pisahkan koma):</label>
+                      <input
+                        type="text"
+                        value={
+                          Array.isArray(draftSupplier.produkUnggulan)
+                            ? draftSupplier.produkUnggulan.join(', ')
+                            : draftSupplier.produkUnggulan || ''
+                        }
+                        onChange={(e) =>
+                          setDraftSupplier((prev) => ({
+                            ...prev,
+                            produkUnggulan: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
+                          }))
+                        }
+                        placeholder="Pupuk Urea, NPK Phonska Plus, Benih Padi Ciherang"
+                        className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold focus:outline-blue-500"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-3 space-y-2 text-xs">
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Nama Toko/Kios:</span>
+                      <span className="font-semibold text-slate-800">{draftSupplier.nama || '—'}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Kategori Usaha:</span>
+                      <span className="font-semibold text-blue-700">{draftSupplier.kategori || '—'}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Kontak WA:</span>
+                      <span className="font-semibold text-slate-800">{draftSupplier.kontak || '—'}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Wilayah:</span>
+                      <span className="font-semibold text-slate-700">{draftSupplier.kabupaten || draftSupplier.alamat || '—'}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Produk Unggulan:</span>
+                      <span className="font-semibold text-slate-700">
+                        {Array.isArray(draftSupplier.produkUnggulan)
+                          ? draftSupplier.produkUnggulan.join(', ')
+                          : draftSupplier.produkUnggulan || '—'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-50 p-2 rounded-lg">
+                      <span className="text-slate-500">Stok Tersedia:</span>
+                      <span className="font-semibold text-emerald-700">{draftSupplier.stokTersedia || '—'}</span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={handleSaveDraftSupplierToDatabase}
+                      disabled={isSavingSupplierDraft}
+                      className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center space-x-1.5 transition shadow-xs cursor-pointer ${
+                        draftSupplier.nama && draftSupplier.kategori
+                          ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                          : 'bg-amber-600 hover:bg-amber-700 text-white'
+                      }`}
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      <span>
+                        {isSavingSupplierDraft
+                          ? 'Menyimpan Supplier...'
+                          : draftSupplier.nama && draftSupplier.kategori
+                          ? 'Simpan Data Supplier ke Google Sheets'
+                          : 'Lengkapi Nama Toko & Kategori'}
+                      </span>
+                    </button>
+
+                    <button
+                      onClick={() => setShowEditSupplierDraft(!showEditSupplierDraft)}
+                      className="px-2.5 py-2 border border-slate-200 hover:bg-slate-100 rounded-xl text-xs text-slate-600 font-medium transition cursor-pointer"
+                      title="Sesuaikan Form Data Supplier"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  {(!draftSupplier.nama) && (
+                    <button
+                      onClick={() => {
+                        setDraftSupplier({
+                          nama: 'Kios Tani Berkah Makmur',
+                          kategori: 'Pupuk & Saprodi',
+                          kontak: '+62 812-9988-7711',
+                          alamat: 'Jl. Raya Subang - Pagaden No. 45',
+                          kabupaten: 'Subang, Jawa Barat',
+                          statusKemitraan: 'Terverifikasi Dinas',
+                          produkUnggulan: ['Pupuk Urea Petro', 'NPK Phonska Plus', 'Benih Ciherang'],
+                          stokTersedia: '20 Ton (Ready Stok)',
+                          radiusLayananKm: 30,
+                          jamBuka: '07.30 - 17.00 WIB',
+                          petaniBinaanCount: 45,
+                        });
+                      }}
+                      className="w-full py-1.5 px-2 bg-blue-50/70 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-xl text-[11px] font-semibold flex items-center justify-center space-x-1 transition cursor-pointer"
+                    >
+                      <PlusCircle className="w-3 h-3 text-blue-600" />
+                      <span>Isi Draf Contoh: Kios Tani Berkah (Pupuk 20 Ton Subang)</span>
+                    </button>
+                  )}
                 </div>
               </div>
             )}
 
-            <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={handleSaveDraftToDatabase}
-                  disabled={isSavingDraft}
-                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center space-x-1.5 transition shadow-xs cursor-pointer ${
-                    isDraftComplete
-                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                      : 'bg-amber-600 hover:bg-amber-700 text-white'
-                  }`}
-                >
-                  <Save className="w-3.5 h-3.5" />
-                  <span>
-                    {isSavingDraft
-                      ? 'Menyimpan ke Sheets...'
-                      : isDraftComplete
-                      ? 'Simpan Data Lengkap ke Google Sheets'
-                      : 'Lengkapi Draf Terlebih Dahulu'}
-                  </span>
-                </button>
-
-                <button
-                  onClick={() => setShowEditDraft(!showEditDraft)}
-                  className="px-2.5 py-2 border border-slate-200 hover:bg-slate-100 rounded-xl text-xs text-slate-600 font-medium transition cursor-pointer"
-                  title="Sesuaikan Form Data"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              {(!draftFarmer.nama && !draftFarmer.komoditas) && (
-                <button
-                  onClick={() => {
-                    setDraftFarmer({
-                      nama: 'Pak Suparman',
-                      noHp: '+62 812-7788-9900',
-                      alamat: 'Desa Compreng RT 03/04',
-                      kabupaten: 'Subang',
-                      luasLahan: 2.5,
-                      luasLahanFormatted: '2.5 Ha (25.000 m²)',
-                      komoditas: 'Jagung Hibrida',
-                      varietas: 'Bisi 18',
-                      estimasiPanen: 'November 2026',
-                      estimasiHasilTon: 15.0,
-                    });
-                  }}
-                  className="w-full py-1.5 px-2 bg-emerald-50/70 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-[11px] font-semibold flex items-center justify-center space-x-1 transition cursor-pointer"
-                >
-                  <PlusCircle className="w-3 h-3 text-emerald-600" />
-                  <span>Isi Draf Contoh: Pak Suparman (Jagung 2.5 Ha)</span>
-                </button>
-              )}
-
+            <div className="mt-3 pt-3 border-t border-slate-100">
               <button
                 onClick={onNavigateToSheets}
                 className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold flex items-center justify-center space-x-2 transition shadow-xs cursor-pointer"

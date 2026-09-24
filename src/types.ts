@@ -15,6 +15,30 @@ export interface FarmerRecord {
   catatanAI?: string;
   syncStatus: 'synced' | 'pending' | 'failed';
   googleSheetRow?: number;
+  latitude?: number;
+  longitude?: number;
+  supplierTerhubungId?: string; // ID supplier mitra terdekat
+}
+
+export interface SupplierRecord {
+  id: string;
+  nama: string;
+  kategori: 'Pupuk & Saprodi' | 'Bibit & Benih' | 'Alat & Mesin Pertanian (Alsintan)' | 'Offtaker & Pengepul' | 'Koperasi Tani';
+  kontak: string;
+  alamat: string;
+  kabupaten: string;
+  latitude: number;
+  longitude: number;
+  statusKemitraan: 'Mitra Aktif' | 'Terverifikasi Dinas' | 'Kios Resmi BUMN';
+  produkUnggulan: string[];
+  stokTersedia?: string;
+  radiusLayananKm?: number;
+  jamBuka?: string;
+  petaniBinaanCount?: number;
+  catatan?: string;
+  googleSheetRow?: number;
+  timestamp?: string;
+  syncStatus?: 'synced' | 'pending' | 'failed';
 }
 
 export interface MarketCommodity {
@@ -39,11 +63,17 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   type?: 'text' | 'form_confirm' | 'price_alert' | 'image' | 'voice_note';
+  entityType?: 'farmer' | 'supplier';
   extractedData?: Partial<FarmerRecord>;
+  extractedSupplier?: Partial<SupplierRecord>;
   quickReplies?: string[];
   imageUrl?: string;
   audioDuration?: string;
   transcription?: string;
+  aiProvider?: '9router' | 'gemini' | 'rule_based' | 'cache' | 'agronomy_engine' | 'analytics_engine';
+  aiModel?: string;
+  fromCache?: boolean;
+  tokensUsed?: number;
 }
 
 export interface AnomalyNotification {
@@ -68,6 +98,9 @@ export interface StrategicRecommendation {
   rekomendasiKebijakanHarga: string[];
   rekomendasiRantaiPasok: string[];
   dataScientistNotes: string;
+  fromCache?: boolean;
+  cachedAt?: string;
+  cacheNotice?: string;
 }
 
 export interface AdminUser {
@@ -80,4 +113,17 @@ export interface AdminUser {
   aktif: boolean;
   waktuTerdaftar: string;
 }
+
+export interface NineRouterStatus {
+  configured: boolean;
+  url?: string;
+  hasKey: boolean;
+  model: string;
+  healthy: boolean;
+  activeProvider: '9router' | 'gemini' | 'rule_based';
+  availableModels?: string[];
+  latencyMs?: number;
+  message?: string;
+}
+
 

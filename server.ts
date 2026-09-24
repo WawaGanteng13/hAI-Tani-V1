@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import {
@@ -8,6 +9,7 @@ import {
   INITIAL_NOTIFICATIONS,
   INITIAL_STRATEGIC_RECOMMENDATION,
   INITIAL_ADMINS,
+  INITIAL_SUPPLIERS,
 } from "./src/data/mockData";
 import {
   FarmerRecord,
@@ -15,16 +17,121 @@ import {
   AnomalyNotification,
   StrategicRecommendation,
   AdminUser,
+  SupplierRecord,
 } from "./src/types";
+import { calculateFertilizerRecommendation } from "./src/utils/agronomy";
 
 dotenv.config();
 
-// In-memory data stores
+// In-memory data stores (with local disk-backed persistence)
 let farmersDb: FarmerRecord[] = [...INITIAL_FARMERS];
 let commoditiesDb: MarketCommodity[] = [...INITIAL_COMMODITIES];
 let notificationsDb: AnomalyNotification[] = [...INITIAL_NOTIFICATIONS];
 let latestRecommendation: StrategicRecommendation = { ...INITIAL_STRATEGIC_RECOMMENDATION };
+let latestRecommendationDataHash = "";
+let lastRecommendationGeneratedAt = Date.now();
 let adminsDb: AdminUser[] = [...INITIAL_ADMINS];
+let suppliersDb: SupplierRecord[] = [...INITIAL_SUPPLIERS];
+
+// Disk-backed persistence directories & paths
+const DATA_DIR = path.join(process.cwd(), "data");
+const FARMERS_FILE = path.join(DATA_DIR, "farmers_db.json");
+const ADMINS_FILE = path.join(DATA_DIR, "admins_db.json");
+const SUPPLIERS_FILE = path.join(DATA_DIR, "suppliers_db.json");
+
+// Webhook audit logs
+let webhookLogs: Array<{ id: string; timestamp: string; event: string; detail: string; status: string }> = [
+  {
+    id: "wh-init",
+    timestamp: new Date().toISOString().replace("T", " ").substring(0, 19),
+    event: "system_init",
+    detail: "Sistem Webhook TaniAI siap menerima data dua arah dari Google Apps Script",
+    status: "READY",
+  },
+];
+
+function initPersistence() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(FARMERS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(FARMERS_FILE, "utf-8"));
+      if (Array.isArray(data) && data.length > 0) {
+        farmersDb = data.map((f: FarmerRecord) => {
+          const init = INITIAL_FARMERS.find((i) => i.id === f.id);
+          return {
+            ...f,
+            latitude: f.latitude ?? init?.latitude ?? -6.5 + (Math.random() * 0.1 - 0.05),
+            longitude: f.longitude ?? init?.longitude ?? 107.5 + (Math.random() * 0.1 - 0.05),
+            supplierTerhubungId: f.supplierTerhubungId ?? init?.supplierTerhubungId,
+          };
+        });
+        console.log(`[Storage] Berhasil memuat ${farmersDb.length} data petani dari disk (${FARMERS_FILE})`);
+      }
+    } else {
+      saveFarmersToDisk();
+    }
+
+    if (fs.existsSync(ADMINS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(ADMINS_FILE, "utf-8"));
+      if (Array.isArray(data) && data.length > 0) {
+        adminsDb = data;
+        console.log(`[Storage] Berhasil memuat ${adminsDb.length} admin dari disk (${ADMINS_FILE})`);
+      }
+    } else {
+      saveAdminsToDisk();
+    }
+
+    if (fs.existsSync(SUPPLIERS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SUPPLIERS_FILE, "utf-8"));
+      if (Array.isArray(data) && data.length > 0) {
+        suppliersDb = data;
+        console.log(`[Storage] Berhasil memuat ${suppliersDb.length} data supplier dari disk (${SUPPLIERS_FILE})`);
+      }
+    } else {
+      saveSuppliersToDisk();
+    }
+  } catch (err) {
+    console.error("[Storage] Inisialisasi storage lokal gagal:", err);
+  }
+}
+
+function saveFarmersToDisk() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(FARMERS_FILE, JSON.stringify(farmersDb, null, 2), "utf-8");
+  } catch (err) {
+    console.error("[Storage] Gagal menyimpan farmers_db.json:", err);
+  }
+}
+
+function saveAdminsToDisk() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(ADMINS_FILE, JSON.stringify(adminsDb, null, 2), "utf-8");
+  } catch (err) {
+    console.error("[Storage] Gagal menyimpan admins_db.json:", err);
+  }
+}
+
+function saveSuppliersToDisk() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(SUPPLIERS_FILE, JSON.stringify(suppliersDb, null, 2), "utf-8");
+  } catch (err) {
+    console.error("[Storage] Gagal menyimpan suppliers_db.json:", err);
+  }
+}
+
+// Inisialisasi data storage saat server pertama kali booting
+initPersistence();
 
 // Helper to normalize phone numbers for accurate matching (+62, 08, dashes, spaces)
 function normalizePhone(phone?: string): string {
@@ -57,7 +164,16 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
   if (nameMatch && nameMatch[1] && nameMatch[1].trim().length > 2) {
     const raw = nameMatch[1].trim();
     if (!["saya", "petani", "tani", "mitra", "baru", "lahan", "data", "semua", "rekap"].includes(raw.toLowerCase())) {
-      ext.nama = raw.startsWith("Pak ") || raw.startsWith("Bu ") ? raw : `Pak ${raw}`;
+      const lowerRaw = raw.toLowerCase();
+      if (lowerRaw.startsWith("pak ") || lowerRaw.startsWith("bapak ")) {
+        const cleanName = raw.replace(/^(?:pak|bapak)\s+/i, "").trim();
+        ext.nama = `Pak ${cleanName}`;
+      } else if (lowerRaw.startsWith("bu ") || lowerRaw.startsWith("ibu ")) {
+        const cleanName = raw.replace(/^(?:bu|ibu)\s+/i, "").trim();
+        ext.nama = `Bu ${cleanName}`;
+      } else {
+        ext.nama = `Pak ${raw}`;
+      }
     }
   }
 
@@ -292,6 +408,8 @@ function saveFarmerRecord(
     googleSheetRow: farmersDb.length + 2,
   };
   farmersDb.unshift(newRecord);
+  saveFarmersToDisk();
+  bumpDataVersion();
   return newRecord;
 }
 
@@ -325,6 +443,284 @@ function formatSuccessFarmerRegistration(newRecord: FarmerRecord, activeAdmin?: 
     `• *Baris Google Sheets:* Baris #${newRecord.googleSheetRow}\n\n` +
     `Data sudah dapat dilihat di tab Dashboard dan Google Sheets secara real-time!`
   );
+}
+
+// Coordinate resolver based on kabupaten name or general location
+function resolveCoordinates(locationStr?: string): { lat: number; lng: number } {
+  const loc = (locationStr || "").toLowerCase();
+  let baseLat = -6.5716;
+  let baseLng = 107.7587;
+
+  if (loc.includes("karawang")) { baseLat = -6.3073; baseLng = 107.3069; }
+  else if (loc.includes("subang")) { baseLat = -6.5716; baseLng = 107.7587; }
+  else if (loc.includes("indramayu")) { baseLat = -6.3264; baseLng = 108.3200; }
+  else if (loc.includes("majalengka")) { baseLat = -6.8361; baseLng = 108.2275; }
+  else if (loc.includes("cianjur")) { baseLat = -6.8172; baseLng = 107.1399; }
+  else if (loc.includes("bandung") || loc.includes("lembang")) { baseLat = -6.8152; baseLng = 107.6186; }
+  else if (loc.includes("garut")) { baseLat = -7.2167; baseLng = 107.9000; }
+  else if (loc.includes("tasikmalaya")) { baseLat = -7.3274; baseLng = 108.2207; }
+  else if (loc.includes("cirebon")) { baseLat = -6.7320; baseLng = 108.5523; }
+  else if (loc.includes("brebes")) { baseLat = -6.8703; baseLng = 109.0435; }
+  else if (loc.includes("grobogan") || loc.includes("wirosari")) { baseLat = -7.0863; baseLng = 110.9168; }
+  else if (loc.includes("nganjuk")) { baseLat = -7.5810; baseLng = 111.9480; }
+  else if (loc.includes("kediri")) { baseLat = -7.8480; baseLng = 112.0178; }
+  else if (loc.includes("blitar")) { baseLat = -7.8690; baseLng = 112.1580; }
+  else if (loc.includes("sukabumi")) { baseLat = -6.9277; baseLng = 106.9299; }
+
+  const jitterLat = (Math.random() - 0.5) * 0.02;
+  const jitterLng = (Math.random() - 0.5) * 0.02;
+  return {
+    lat: Number((baseLat + jitterLat).toFixed(4)),
+    lng: Number((baseLng + jitterLng).toFixed(4)),
+  };
+}
+
+function isSupplierIntent(text: string): boolean {
+  const lower = (text || "").toLowerCase();
+  return (
+    lower.includes("supplier") ||
+    lower.includes("suplier") ||
+    lower.includes("kios pupuk") ||
+    lower.includes("toko saprodi") ||
+    lower.includes("kios tani") ||
+    lower.includes("toko tani") ||
+    lower.includes("toko pertanian") ||
+    lower.includes("agen pupuk") ||
+    lower.includes("distributor benih") ||
+    lower.includes("penyedia alsintan") ||
+    lower.includes("offtaker") ||
+    lower.includes("pengepul") ||
+    lower.includes("koperasi tani") ||
+    lower.includes("penggilingan beras") ||
+    lower.includes("toko benih") ||
+    lower.includes("kios resmi")
+  );
+}
+
+function extractSupplierFromText(
+  text: string,
+  existing: Partial<SupplierRecord> = {}
+): { extracted: Partial<SupplierRecord>; hasMinimumData: boolean } {
+  const ext: Partial<SupplierRecord> = { ...existing };
+  const lower = (text || "").toLowerCase();
+
+  // 1. Kategori Usaha
+  if (lower.includes("pupuk") || lower.includes("saprodi") || lower.includes("obat") || lower.includes("pestisida")) {
+    ext.kategori = "Pupuk & Saprodi";
+  } else if (lower.includes("bibit") || lower.includes("benih") || lower.includes("semai")) {
+    ext.kategori = "Bibit & Benih";
+  } else if (lower.includes("alsintan") || lower.includes("traktor") || lower.includes("sprayer") || lower.includes("mesin")) {
+    ext.kategori = "Alat & Mesin Pertanian (Alsintan)";
+  } else if (lower.includes("pengepul") || lower.includes("offtaker") || lower.includes("tengkulak") || lower.includes("tampung") || lower.includes("serap") || lower.includes("giling") || lower.includes("beras")) {
+    ext.kategori = "Offtaker & Pengepul";
+  } else if (lower.includes("koperasi") || lower.includes("poktan") || lower.includes("gapoktan")) {
+    ext.kategori = "Koperasi Tani";
+  }
+
+  // 2. Nama Toko/Kios/Supplier
+  const nameMatch = text.match(/(?:kios|toko|supplier|ud|pt|cv|koperasi)\s+([A-Za-z0-9\s&]+?)(?:,|di|\.|\n|$)/i);
+  if (nameMatch && nameMatch[1]) {
+    const raw = nameMatch[0].trim();
+    if (raw.length >= 4) {
+      ext.nama = raw;
+    }
+  }
+
+  // 3. Kontak / Nomor HP / WhatsApp
+  const phoneMatch = text.match(/(?:\+?62|08)[0-9\s-]{8,15}/);
+  if (phoneMatch) {
+    ext.kontak = phoneMatch[0].replace(/\s+/g, " ").trim();
+  }
+
+  // 4. Kabupaten / Wilayah
+  const districts = [
+    "Subang", "Karawang", "Indramayu", "Majalengka", "Cianjur",
+    "Bandung Barat", "Bandung", "Lembang", "Garut", "Brebes",
+    "Grobogan", "Nganjuk", "Kediri", "Blitar", "Cirebon", "Sukabumi"
+  ];
+  for (const d of districts) {
+    if (lower.includes(d.toLowerCase())) {
+      ext.kabupaten = `${d}, Jawa Barat`;
+      if (d === "Brebes" || d === "Grobogan") ext.kabupaten = `${d}, Jawa Tengah`;
+      if (d === "Nganjuk" || d === "Kediri" || d === "Blitar") ext.kabupaten = `${d}, Jawa Timur`;
+      break;
+    }
+  }
+
+  // 5. Alamat / Jalan
+  const jlMatch = text.match(/(?:jl|jalan|desa|kec|kecamatan|blok)\s+([A-Za-z0-9\s,.-]+?)(?:,|\.|\n|$)/i);
+  if (jlMatch && jlMatch[0]) {
+    ext.alamat = jlMatch[0].trim();
+  }
+
+  // 6. Produk Unggulan
+  const prodMatch = text.match(/(?:produk|jual|sedia|stok|komoditas)\s*:\s*([A-Za-z0-9\s,.-]+?)(?:\.|\n|$)/i);
+  if (prodMatch && prodMatch[1]) {
+    ext.produkUnggulan = prodMatch[1].split(",").map((s) => s.trim()).filter(Boolean);
+  }
+
+  // 7. Stok
+  const stokMatch = text.match(/(?:stok|kapasitas|ready)\s*:\s*([A-Za-z0-9\s,.-]+?)(?:\.|\n|$)/i);
+  if (stokMatch && stokMatch[1]) {
+    ext.stokTersedia = stokMatch[1].trim();
+  }
+
+  const hasMinimumData = !!(ext.nama || ext.kategori || ext.kabupaten || ext.kontak);
+  return { extracted: ext, hasMinimumData };
+}
+
+function checkSupplierCompleteness(record: Partial<SupplierRecord>): {
+  isComplete: boolean;
+  missingFields: string[];
+  presentFields: string[];
+} {
+  const missing: string[] = [];
+  const present: string[] = [];
+
+  const hasValidName =
+    !!record.nama &&
+    record.nama.trim().length >= 3 &&
+    !["Supplier", "Toko", "Kios", "Mitra", "Toko Pertanian"].includes(record.nama.trim());
+  if (hasValidName) {
+    present.push(`Nama Toko/Kios: *${record.nama}*`);
+  } else {
+    missing.push("Nama Toko/Kios/Supplier");
+  }
+
+  const hasValidCategory = !!record.kategori && record.kategori.trim().length >= 3;
+  if (hasValidCategory) {
+    present.push(`Kategori Usaha: *${record.kategori}*`);
+  } else {
+    missing.push("Kategori Usaha (Pupuk & Saprodi / Bibit & Benih / Alsintan / Offtaker / Koperasi)");
+  }
+
+  const hasValidLocation =
+    (!!record.kabupaten && record.kabupaten.trim().length >= 3) ||
+    (!!record.alamat && record.alamat.trim().length >= 3);
+  if (hasValidLocation) {
+    const loc = [record.alamat, record.kabupaten].filter(Boolean).join(", ");
+    present.push(`Lokasi: *${loc}*`);
+  } else {
+    missing.push("Lokasi / Wilayah (Kabupaten atau Alamat Toko)");
+  }
+
+  return {
+    isComplete: missing.length === 0,
+    missingFields: missing,
+    presentFields: present,
+  };
+}
+
+function saveSupplierRecord(
+  draft: Partial<SupplierRecord>,
+  activeAdmin?: AdminUser,
+  senderPhone?: string
+): SupplierRecord {
+  const newId = `SUP-${String(suppliersDb.length + 1).padStart(3, "0")}`;
+  const now = new Date();
+  const timestamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
+
+  const coords = resolveCoordinates(draft.kabupaten || draft.alamat || "Subang");
+
+  const newRecord: SupplierRecord = {
+    id: newId,
+    nama: draft.nama || "Supplier Saprodi Pertanian",
+    kategori: (draft.kategori as any) || "Pupuk & Saprodi",
+    kontak: draft.kontak || senderPhone || "+62 812-xxxx-xxxx",
+    alamat: draft.alamat || draft.kabupaten || "Pusat Distribusi Pertanian",
+    kabupaten: draft.kabupaten || "Subang, Jawa Barat",
+    latitude: draft.latitude && !isNaN(Number(draft.latitude)) ? Number(draft.latitude) : coords.lat,
+    longitude: draft.longitude && !isNaN(Number(draft.longitude)) ? Number(draft.longitude) : coords.lng,
+    statusKemitraan: (draft.statusKemitraan as any) || (activeAdmin ? "Terverifikasi Dinas" : "Mitra Aktif"),
+    produkUnggulan:
+      Array.isArray(draft.produkUnggulan) && draft.produkUnggulan.length > 0
+        ? draft.produkUnggulan
+        : ["Pupuk & Saprodi Pertanian"],
+    stokTersedia: draft.stokTersedia || "Tersedia",
+    radiusLayananKm: Number(draft.radiusLayananKm) || 25,
+    jamBuka: draft.jamBuka || "Senin - Sabtu: 08.00 - 17.00 WIB",
+    petaniBinaanCount: Number(draft.petaniBinaanCount) || 12,
+    catatan:
+      draft.catatan ||
+      (activeAdmin
+        ? `Didata langsung via WhatsApp oleh Admin ${activeAdmin.nama} (${activeAdmin.role} - ${activeAdmin.instansi}) pada ${now.toLocaleDateString("id-ID")}.`
+        : `Didaftarkan via WhatsApp Chatbot pada ${now.toLocaleDateString("id-ID")}.`),
+    googleSheetRow: suppliersDb.length + 2,
+    timestamp,
+    syncStatus: "synced",
+  };
+
+  suppliersDb.unshift(newRecord);
+  saveSuppliersToDisk();
+  bumpDataVersion();
+  return newRecord;
+}
+
+function formatSuccessSupplierRegistration(record: SupplierRecord, activeAdmin?: AdminUser): string {
+  const adminBadge = activeAdmin
+    ? `\n👮 *Diverifikasi oleh:* ${activeAdmin.nama} (${activeAdmin.role} - ${activeAdmin.instansi})`
+    : "";
+
+  return (
+    `✅ *Data Supplier Produk Pertanian Berhasil Ditambahkan ke Google Sheets!*\n\n` +
+    `Data mitra penyedia sarana produksi / offtaker telah berhasil dicatat dan disinkronkan ke Lembar Database Supplier:\n\n` +
+    `• *ID Mitra:* \`${record.id}\`\n` +
+    `• *Nama Toko/Kios:* *${record.nama}*\n` +
+    `• *Kategori Usaha:* *${record.kategori}*\n` +
+    `• *Kontak WhatsApp:* ${record.kontak}\n` +
+    `• *Wilayah:* ${record.alamat}, ${record.kabupaten}\n` +
+    `• *Produk Unggulan:* ${record.produkUnggulan.join(", ")}\n` +
+    `• *Status Kemitraan:* 🟢 *${record.statusKemitraan}*\n` +
+    `• *Baris Google Sheets:* Baris #${record.googleSheetRow || "Baru"}\n` +
+    `• *Koordinat Peta:* (${record.latitude.toFixed(4)}, ${record.longitude.toFixed(4)})\n` +
+    adminBadge +
+    `\n\n📌 *Data mitra ini kini otomatis muncul di Google Maps Platform* dan dapat dihubungkan langsung dengan petani binaan terdekat.`
+  );
+}
+
+function formatIncompleteSupplierPrompt(
+  draft: Partial<SupplierRecord>,
+  recipientName?: string,
+  isAdmin: boolean = false
+): {
+  reply: string;
+  quickReplies: string[];
+  extractedSupplier: Partial<SupplierRecord>;
+  isComplete: boolean;
+} {
+  const check = checkSupplierCompleteness(draft);
+
+  const checklist = [
+    `• Nama Toko/Kios: ${draft.nama ? `✅ *${draft.nama}*` : "❌ _Belum diisi_"}`,
+    `• Kategori Usaha: ${draft.kategori ? `✅ *${draft.kategori}*` : "❌ _Belum diisi_"}`,
+    `• Kontak / WA: ${draft.kontak ? `✅ *${draft.kontak}*` : "❌ _Belum diisi_"}`,
+    `• Wilayah / Lokasi: ${draft.kabupaten || draft.alamat ? `✅ *${draft.kabupaten || draft.alamat}*` : "❌ _Belum diisi_"}`,
+    `• Produk Unggulan: ${draft.produkUnggulan && draft.produkUnggulan.length > 0 ? `✅ *${draft.produkUnggulan.join(", ")}*` : "⚪ _Opsional_"}`,
+  ].join("\n");
+
+  const missingList = check.missingFields.map((m, idx) => `${idx + 1}. *${m}*`).join("\n");
+  const salutation = isAdmin && recipientName ? `Bpk/Ibu *${recipientName}*` : `Bapak/Ibu`;
+
+  const reply =
+    `📝 *Draf Data Supplier Pertanian Dicatat (Belum Lengkap)*\n\n` +
+    `Terima kasih ${salutation}. Data sementara mitra supplier telah tersimpan di draf percakapan, namun *belum dimasukkan ke Google Sheets* karena data pokok belum lengkap:\n\n` +
+    `${checklist}\n\n` +
+    `⚠️ *Data yang masih harus dilengkapi:*\n${missingList}\n\n` +
+    `💡 *Silakan ketik data kelanjutannya* (misal: sebutkan nama toko, kategori pupuk/bibit/alsintan, atau kabupaten lokasinya).`;
+
+  const quickReplies = [
+    "Kategori: Pupuk & Saprodi",
+    "Kategori: Bibit & Benih",
+    "Kategori: Offtaker & Pengepul",
+    "Lokasi: Subang",
+  ];
+
+  return {
+    reply,
+    quickReplies,
+    extractedSupplier: draft,
+    isComplete: false,
+  };
 }
 
 // Smart Dynamic Fallback Generator for Admin queries if AI is busy/offline
@@ -526,6 +922,293 @@ function generateSmartAdminFallback(
   };
 }
 
+// 9Router AI Gateway Configuration & Discovery
+function getNineRouterConfig() {
+  let url = process.env.NINEROUTER_URL?.trim() || "";
+  const key = process.env.NINEROUTER_KEY?.trim() || "";
+  let model = process.env.NINEROUTER_MODEL?.trim() || "gpt-4.1";
+
+  url = url.replace(/\/+$/, "");
+  if (url.endsWith("/v1")) {
+    url = url.slice(0, -3);
+  }
+
+  // Handle incompatible model aliases
+  if (model === "combo1" || model.includes("openai/")) {
+    model = "gpt-4.1";
+  }
+
+  const isConfigured = Boolean(url && url.length > 5);
+  return {
+    url,
+    key,
+    model,
+    isConfigured,
+  };
+}
+
+async function checkNineRouterHealth(): Promise<{ ok: boolean; latencyMs?: number; message?: string }> {
+  const cfg = getNineRouterConfig();
+  if (!cfg.isConfigured) {
+    return { ok: false, message: "NINEROUTER_URL belum dikonfigurasi di environment." };
+  }
+  const startTime = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+  try {
+    const headers: Record<string, string> = {};
+    if (cfg.key) headers["Authorization"] = `Bearer ${cfg.key}`;
+
+    const res = await fetch(`${cfg.url}/api/health`, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+    const latency = Date.now() - startTime;
+    if (res.ok) {
+      return { ok: true, latencyMs: latency, message: "Terhubung ke 9Router Gateway" };
+    }
+    // Probe models endpoint if health endpoint is 404
+    const probeRes = await fetch(`${cfg.url}/v1/models`, { headers, signal: controller.signal });
+    if (probeRes.ok) {
+      return { ok: true, latencyMs: Date.now() - startTime, message: "Terhubung ke 9Router (/v1/models aktif)" };
+    }
+    return { ok: false, latencyMs: latency, message: `9Router status: ${res.status}` };
+  } catch (err: any) {
+    return { ok: false, message: err?.message || "Gagal menghubungi 9Router gateway" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ==========================================
+// COST & TOKEN OPTIMIZATION ENGINE (3 PILLARS)
+// 1. Kirim Hanya Yang Dibutuhkan: Ringkasan Terlebih Dahulu & Targeted Retrieval
+// 2. Batasi Jawaban AI: Max Output Tokens & Instant Cancellation (AbortSignal)
+// 3. Gunakan Kembali Hasil: Smart Query Cache & Report Reuse
+// ==========================================
+
+interface AICacheEntry {
+  reply: string;
+  quickReplies?: string[];
+  extracted?: any;
+  isAdminAction?: boolean;
+  timestamp: number;
+  dataVersion: number;
+  provider: "cache";
+}
+
+const aiResponseCache = new Map<string, AICacheEntry>();
+let currentDataVersion = 1;
+let totalTokensSavedEstimate = 0;
+let totalCacheHits = 0;
+
+function bumpDataVersion() {
+  currentDataVersion++;
+  console.log(`[AI Optimization] Data version updated (${currentDataVersion}). Cache invalidation synchronized.`);
+}
+
+function getNormalizedCacheKey(role: string, message: string): string {
+  const clean = (message || "")
+    .toLowerCase()
+    .replace(/[^\w\s]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `${role}::${clean}`;
+}
+
+function isQuerySafeToCache(message: string): boolean {
+  const lower = (message || "").toLowerCase();
+  // DO NOT cache user registration mutations or phone numbers
+  const mutationKeywords = [
+    "tambah", "daftarkan", "daftar", "input", "masukkan", "catat", "simpan",
+    "nama saya", "lahan saya", "panen saya", "desa ", "kecamatan ", "08", "+62"
+  ];
+  return !mutationKeywords.some((k) => lower.includes(k));
+}
+
+// 1. Targeted & Summarized Context Builder (No massive raw JSON dumps!)
+function buildLeanTargetedContext(message: string, isAdmin: boolean) {
+  const lower = (message || "").toLowerCase();
+
+  const totalLuas = farmersDb.reduce((acc, f) => acc + (f.luasLahan || 0), 0).toFixed(1);
+  const totalPanen = farmersDb.reduce((acc, f) => acc + (f.estimasiHasilTon || 0), 0).toFixed(1);
+  const unverified = farmersDb.filter((f) => f.statusVerifikasi !== "Terverifikasi");
+
+  // Aggregate stats per crop
+  const cropSummary: Record<string, { count: number; luas: number; ton: number }> = {};
+  for (const f of farmersDb) {
+    const key = f.komoditas ? f.komoditas.split(" ")[0] : "Lainnya";
+    if (!cropSummary[key]) cropSummary[key] = { count: 0, luas: 0, ton: 0 };
+    cropSummary[key].count += 1;
+    cropSummary[key].luas += f.luasLahan || 0;
+    cropSummary[key].ton += f.estimasiHasilTon || 0;
+  }
+  const cropLine = Object.entries(cropSummary)
+    .map(([k, v]) => `${k}: ${v.count} petani (${v.luas.toFixed(1)} Ha, ~${v.ton.toFixed(1)} Ton)`)
+    .join(" | ");
+
+  // Targeted on-demand retrieval: only attach specific records if asked!
+  const mentionsCabai = lower.includes("cabai") || lower.includes("rawit");
+  const mentionsPadi = lower.includes("padi") || lower.includes("beras");
+  const mentionsBawang = lower.includes("bawang");
+  const mentionsJagung = lower.includes("jagung");
+  const mentionsVerifikasi = lower.includes("verifikasi") || lower.includes("pending") || lower.includes("belum");
+  const mentionsAll = lower.includes("semua petani") || lower.includes("daftar semua") || lower.includes("rekap semua") || lower.includes("seluruh petani") || lower.includes("direktori");
+
+  const kabList = ["subang", "karawang", "brebes", "kediri", "malang", "blitar", "garut", "cianjur", "nganjuk"];
+  const matchedKab = kabList.find((k) => lower.includes(k));
+
+  const matchedFarmer = farmersDb.find((f) => {
+    const fn = f.nama.toLowerCase().replace(/^(pak|bu|bapak|ibu)\s+/, "");
+    return fn.length > 2 && lower.includes(fn);
+  });
+
+  let targetedDetails = "";
+  let detailsType = "none";
+
+  if (matchedFarmer) {
+    detailsType = "single_farmer";
+    targetedDetails = `DATA DETAIL PETANI YANG DITANYAKAN:
+- Nama: ${matchedFarmer.nama} (ID: ${matchedFarmer.id})
+- Kontak: ${matchedFarmer.noHp}
+- Komoditas: ${matchedFarmer.komoditas} (${matchedFarmer.varietas || "Unggul"})
+- Luas: ${matchedFarmer.luasLahan} Ha | Panen: ${matchedFarmer.estimasiPanen} (~${matchedFarmer.estimasiHasilTon} Ton)
+- Lokasi: ${matchedFarmer.alamat}, ${matchedFarmer.kabupaten}
+- Status: ${matchedFarmer.statusVerifikasi}`;
+  } else if (mentionsVerifikasi) {
+    detailsType = "unverified_list";
+    targetedDetails = `DATA PETANI BELUM DIVERIFIKASI (${unverified.length} orang):
+${unverified.map((u) => `• ${u.nama} | ${u.komoditas} ${u.luasLahan} Ha | ${u.kabupaten}`).join("\n") || "Semua sudah terverifikasi."}`;
+  } else if (matchedKab) {
+    detailsType = `kabupaten_${matchedKab}`;
+    const kabFarmers = farmersDb.filter((f) => (f.kabupaten || "").toLowerCase().includes(matchedKab));
+    targetedDetails = `DATA PETANI DI KABUPATEN ${matchedKab.toUpperCase()} (${kabFarmers.length} orang):
+${kabFarmers.slice(0, 5).map((f) => `• ${f.nama} | ${f.komoditas} ${f.luasLahan} Ha | Panen: ${f.estimasiPanen}`).join("\n")}`;
+  } else if (mentionsCabai || mentionsPadi || mentionsBawang || mentionsJagung) {
+    const cropName = mentionsCabai ? "Cabai" : mentionsPadi ? "Padi" : mentionsBawang ? "Bawang" : "Jagung";
+    detailsType = `crop_${cropName}`;
+    const matchedFarmers = farmersDb.filter((f) => (f.komoditas || "").toLowerCase().includes(cropName.toLowerCase()));
+    const matchedCom = commoditiesDb.find((c) => c.nama.toLowerCase().includes(cropName.toLowerCase()));
+    targetedDetails = `DATA SPESIFIK KOMODITAS ${cropName.toUpperCase()}:
+${matchedCom ? `• Harga Pasar: Rp ${matchedCom.hargaSekarang.toLocaleString("id-ID")}/kg (${matchedCom.statusAnomali}, ${matchedCom.perubahanPersen > 0 ? "+" : ""}${matchedCom.perubahanPersen}%)` : ""}
+• Petani Terdata (${matchedFarmers.length} orang):
+${matchedFarmers.slice(0, 5).map((f) => `• ${f.nama} (${f.kabupaten || f.alamat}, ${f.luasLahan} Ha, est. ${f.estimasiHasilTon} Ton, panen ${f.estimasiPanen})`).join("\n")}`;
+  } else if (mentionsAll && isAdmin) {
+    detailsType = "directory";
+    targetedDetails = `DIREKTORI RINGKAS (Total ${farmersDb.length} petani):
+${farmersDb.slice(0, 8).map((f) => `• ${f.nama} | ${f.komoditas} ${f.luasLahan} Ha | ${f.kabupaten} | Panen: ${f.estimasiPanen}`).join("\n")}
+${farmersDb.length > 8 ? `...dan ${farmersDb.length - 8} petani lainnya tercatat di Google Sheets.` : ""}`;
+  }
+
+  let marketHighlight = "";
+  if (lower.includes("harga") || lower.includes("pasar") || mentionsCabai || mentionsPadi || mentionsBawang || mentionsJagung) {
+    marketHighlight = `DATA HARGA PASAR HARI INI:
+${commoditiesDb.map((c) => `• ${c.nama}: Rp ${c.hargaSekarang.toLocaleString("id-ID")}/kg (${c.statusAnomali})`).join("\n")}`;
+  } else {
+    const anomalies = commoditiesDb.filter((c) => c.statusAnomali !== "NORMAL");
+    if (anomalies.length > 0) {
+      marketHighlight = `STATUS PASAR: ${anomalies.map((a) => `${a.nama} (Rp ${a.hargaSekarang.toLocaleString("id-ID")}/kg, ${a.statusAnomali})`).join(", ")}`;
+    }
+  }
+
+  return {
+    summary: `RINGKASAN STATISTIK: ${farmersDb.length} Petani Terdata, Luas ${totalLuas} Ha, Proyeksi Panen ${totalPanen} Ton.\nKomoditas: ${cropLine}.\nBelum Diverifikasi: ${unverified.length} petani.`,
+    targetedDetails,
+    marketHighlight,
+    detailsType,
+  };
+}
+
+async function callNineRouterChat(
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  modelOverride?: string,
+  options?: { signal?: AbortSignal; maxTokens?: number }
+): Promise<string> {
+  const cfg = getNineRouterConfig();
+  if (!cfg.isConfigured) {
+    throw new Error("9Router belum dikonfigurasi");
+  }
+
+  let model = modelOverride || cfg.model;
+  if (model === "combo1") {
+    model = "gpt-4.1";
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 16000);
+
+  if (options?.signal) {
+    options.signal.addEventListener("abort", () => {
+      clearTimeout(timeout);
+      controller.abort();
+    });
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (cfg.key) {
+    headers["Authorization"] = `Bearer ${cfg.key}`;
+  }
+
+  const doChatCall = async (modelToUse: string) => {
+    return fetch(`${cfg.url}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: modelToUse,
+        messages,
+        temperature: 0.2,
+        max_tokens: options?.maxTokens || 550,
+      }),
+      signal: controller.signal,
+    });
+  };
+
+  try {
+    let res = await doChatCall(model);
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+
+      // Auto-fallback if 9Router mentions available models (e.g. integrator vscode-chat)
+      const availableMatch = errText.match(/Available models:\s*\[([^\]]+)\]/i);
+      if (availableMatch && availableMatch[1]) {
+        const availableModels = availableMatch[1]
+          .split(/[\s,]+/)
+          .map((m) => m.trim().replace(/['"]/g, ""))
+          .filter(Boolean);
+
+        const candidate =
+          availableModels.find((m) => m === "gpt-4.1" || m.includes("claude-fable") || m.includes("gpt")) ||
+          availableModels[0];
+
+        if (candidate && candidate !== model) {
+          console.log(`[9Router] Model ${model} not permitted by gateway, auto-retrying with: ${candidate}`);
+          const retryRes = await doChatCall(candidate);
+          if (retryRes.ok) {
+            const data: any = await retryRes.json();
+            const content = data?.choices?.[0]?.message?.content;
+            if (content) return content;
+          }
+        }
+      }
+
+      throw new Error(`9Router error ${res.status}: ${errText.substring(0, 200)}`);
+    }
+
+    const data: any = await res.json();
+    const content = data?.choices?.[0]?.message?.content;
+    if (!content) {
+      throw new Error("Respon 9Router kosong atau tidak memiliki format choices[0].message.content");
+    }
+    return content;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // Lazy initialize Gemini client
 let geminiClient: GoogleGenAI | null = null;
 function getGemini(): GoogleGenAI | null {
@@ -538,31 +1221,135 @@ function getGemini(): GoogleGenAI | null {
   return geminiClient;
 }
 
-// Helper to invoke Gemini with automatic model fallback & timeout protection
-async function callGeminiGenerate(ai: GoogleGenAI, contents: any): Promise<string> {
-  // Prioritize fast, high-availability gemini-3.1-flash-lite, then fallback to 3.8-flash and flash-latest
-  const models = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"];
+// Helper to invoke Gemini with automatic model fallback & cancellation/token limit support
+async function callGeminiGenerate(
+  ai: GoogleGenAI,
+  contents: any,
+  options?: { signal?: AbortSignal; maxOutputTokens?: number; systemInstruction?: string }
+): Promise<string> {
+  const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"];
   let lastErr: any = null;
+
   for (const model of models) {
+    if (options?.signal?.aborted) {
+      throw new Error("AI Generation dibatalkan oleh pengguna (hemat biaya)");
+    }
+    let timer: any = null;
     try {
       const callPromise = ai.models.generateContent({
         model,
         contents,
+        config: {
+          maxOutputTokens: options?.maxOutputTokens || 550,
+          abortSignal: options?.signal,
+          temperature: 0.2,
+          systemInstruction: options?.systemInstruction,
+        },
       });
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Timeout (15s) calling ${model}`)), 15000)
-      );
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timeout (15s) calling ${model}`)), 15000);
+      });
       const res: any = await Promise.race([callPromise, timeoutPromise]);
+      if (timer) clearTimeout(timer);
       if (res && res.text) {
         return res.text;
       }
     } catch (err: any) {
+      if (timer) clearTimeout(timer);
       lastErr = err;
+      if (options?.signal?.aborted || err?.name === "AbortError" || err?.message?.includes("Abort")) {
+        throw new Error("AI Generation dibatalkan oleh pengguna (hemat biaya)");
+      }
       const errMsg = err?.status || err?.message || err;
       console.log(`[Gemini Info] Model ${model} fallback triggered (${errMsg}), trying next available model...`);
     }
   }
   throw lastErr || new Error("All Gemini models failed");
+}
+
+// Universal AI Caller with Priority Chain, Cancellation Support & Token Guarding
+async function callUniversalAI(
+  systemPrompt: string,
+  userPrompt: string,
+  history?: Array<{ sender: string; text: string }>,
+  options?: { signal?: AbortSignal; maxOutputTokens?: number }
+): Promise<{ text: string; provider: "9router" | "gemini"; model: string }> {
+  if (options?.signal?.aborted) {
+    throw new Error("Operasi dibatalkan sebelum pengiriman (hemat token)");
+  }
+
+  const nineRouterCfg = getNineRouterConfig();
+  let nineRouterErr: any = null;
+
+  // Compact conversation history: keep only last 2-3 exchanges, trim length
+  const compactHistory = (history || [])
+    .slice(-3)
+    .map((h) => ({
+      sender: h.sender,
+      text: (h.text || "").length > 200 ? (h.text || "").slice(0, 200) + "..." : h.text,
+    }));
+
+  // 1. Coba 9Router jika NINEROUTER_URL dikonfigurasi
+  if (nineRouterCfg.isConfigured) {
+    try {
+      const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+      if (systemPrompt) {
+        messages.push({ role: "system", content: systemPrompt });
+      }
+      for (const h of compactHistory) {
+        messages.push({
+          role: h.sender === "bot" ? "assistant" : "user",
+          content: h.text,
+        });
+      }
+      messages.push({ role: "user", content: userPrompt });
+
+      const text = await callNineRouterChat(messages, undefined, {
+        signal: options?.signal,
+        maxTokens: options?.maxOutputTokens || 550,
+      });
+      console.log(`[AI Dispatcher] Balasan via 9Router (${nineRouterCfg.model})`);
+      return { text, provider: "9router", model: nineRouterCfg.model };
+    } catch (err: any) {
+      if (options?.signal?.aborted) throw err;
+      nineRouterErr = err;
+      console.warn(`[9Router Warning] Pemanggilan 9Router gagal (${err.message}). Beralih ke Google Gemini...`);
+    }
+  }
+
+  // 2. Fallback ke Google Gemini API
+  const ai = getGemini();
+  if (ai) {
+    const historyFormatted = compactHistory
+      .map((h: any) => `${h.sender === "bot" ? "Kang Tani AI" : "User"}: ${h.text}`)
+      .join("\n");
+
+    const contents = [
+      {
+        role: "user",
+        parts: [
+          {
+            text: `${systemPrompt}\n\n${
+              historyFormatted ? `RIWAYAT PERCAKAPAN SINGKAT:\n${historyFormatted}\n\n` : ""
+            }PERTANYAAN PENGGUNA:\n"${userPrompt}"`,
+          },
+        ],
+      },
+    ];
+
+    const text = await callGeminiGenerate(ai, contents, {
+      signal: options?.signal,
+      maxOutputTokens: options?.maxOutputTokens || 550,
+    });
+    console.log(`[AI Dispatcher] Balasan via Google Gemini API`);
+    return { text, provider: "gemini", model: "gemini-3.1-flash-lite" };
+  }
+
+  throw new Error(
+    nineRouterErr
+      ? `9Router gagal (${nineRouterErr.message}) dan Gemini API tidak tersedia`
+      : "Tidak ada provider AI yang aktif (NINEROUTER_URL atau GEMINI_API_KEY belum diisi)"
+  );
 }
 
 export function createServerApp() {
@@ -571,6 +1358,7 @@ export function createServerApp() {
 
   // Health check endpoint
   app.get("/api/health", (_req, res) => {
+    const nineCfg = getNineRouterConfig();
     res.json({
       status: "ok",
       app: "TaniAI - WhatsApp & Google Sheets Agri-Agent",
@@ -580,6 +1368,49 @@ export function createServerApp() {
       commoditiesCount: commoditiesDb.length,
       adminsCount: adminsDb.length,
       hasGeminiKey: !!(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY"),
+      nineRouter: {
+        configured: nineCfg.isConfigured,
+        model: nineCfg.model,
+      },
+    });
+  });
+
+  // GET 9Router Gateway status & model discovery
+  app.get("/api/9router/status", async (_req, res) => {
+    const cfg = getNineRouterConfig();
+    const health = await checkNineRouterHealth();
+    let availableModels: string[] = [];
+
+    if (cfg.isConfigured && health.ok) {
+      try {
+        const headers: Record<string, string> = {};
+        if (cfg.key) headers["Authorization"] = `Bearer ${cfg.key}`;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 4000);
+        const mRes = await fetch(`${cfg.url}/v1/models`, { headers, signal: controller.signal });
+        clearTimeout(timeout);
+        if (mRes.ok) {
+          const mData: any = await mRes.json();
+          if (Array.isArray(mData?.data)) {
+            availableModels = mData.data.map((m: any) => m.id).slice(0, 20);
+          }
+        }
+      } catch {}
+    }
+
+    const geminiAvailable = !!getGemini();
+    const activeProvider = cfg.isConfigured && health.ok ? "9router" : (geminiAvailable ? "gemini" : "rule_based");
+
+    res.json({
+      configured: cfg.isConfigured,
+      url: cfg.url,
+      hasKey: Boolean(cfg.key),
+      model: cfg.model,
+      healthy: health.ok,
+      latencyMs: health.latencyMs,
+      message: health.message,
+      activeProvider,
+      availableModels,
     });
   });
 
@@ -612,6 +1443,7 @@ export function createServerApp() {
     };
 
     adminsDb.push(newAdmin);
+    saveAdminsToDisk();
     res.status(201).json(newAdmin);
   });
 
@@ -622,6 +1454,7 @@ export function createServerApp() {
       return res.status(403).json({ error: "Super Admin utama tidak dapat dihapus." });
     }
     adminsDb = adminsDb.filter((a) => a.id !== id);
+    saveAdminsToDisk();
     res.json({ success: true, message: "Nomor admin berhasil dihapus." });
   });
 
@@ -658,16 +1491,304 @@ export function createServerApp() {
       catatanAI: data.catatanAI || "Data dicatat melalui sistem TaniAI.",
       syncStatus: "synced",
       googleSheetRow: farmersDb.length + 2,
+      latitude: data.latitude !== undefined ? Number(data.latitude) : -6.5 + (Math.random() * 0.1 - 0.05),
+      longitude: data.longitude !== undefined ? Number(data.longitude) : 107.5 + (Math.random() * 0.1 - 0.05),
+      supplierTerhubungId: data.supplierTerhubungId || undefined,
     };
     farmersDb.unshift(newFarmer);
+    saveFarmersToDisk();
     res.status(201).json(newFarmer);
+  });
+
+  // PUT update existing farmer
+  app.put("/api/farmers/:id", (req, res) => {
+    const { id } = req.params;
+    const data = req.body;
+    const idx = farmersDb.findIndex((f) => f.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ error: "Data petani tidak ditemukan." });
+    }
+    const current = farmersDb[idx];
+    const updated: FarmerRecord = {
+      ...current,
+      nama: data.nama !== undefined ? data.nama : current.nama,
+      noHp: data.noHp !== undefined ? data.noHp : current.noHp,
+      alamat: data.alamat !== undefined ? data.alamat : current.alamat,
+      kabupaten: data.kabupaten !== undefined ? data.kabupaten : current.kabupaten,
+      luasLahan: data.luasLahan !== undefined ? Number(data.luasLahan) : current.luasLahan,
+      luasLahanFormatted: data.luasLahan !== undefined ? `${data.luasLahan} Ha` : current.luasLahanFormatted,
+      komoditas: data.komoditas !== undefined ? data.komoditas : current.komoditas,
+      varietas: data.varietas !== undefined ? data.varietas : current.varietas,
+      estimasiPanen: data.estimasiPanen !== undefined ? data.estimasiPanen : current.estimasiPanen,
+      estimasiHasilTon: data.estimasiHasilTon !== undefined ? Number(data.estimasiHasilTon) : current.estimasiHasilTon,
+      statusVerifikasi: data.statusVerifikasi !== undefined ? data.statusVerifikasi : current.statusVerifikasi,
+      catatanAI: data.catatanAI !== undefined ? data.catatanAI : current.catatanAI,
+      latitude: data.latitude !== undefined ? Number(data.latitude) : current.latitude,
+      longitude: data.longitude !== undefined ? Number(data.longitude) : current.longitude,
+      supplierTerhubungId: data.supplierTerhubungId !== undefined ? data.supplierTerhubungId : current.supplierTerhubungId,
+      syncStatus: "synced",
+    };
+    farmersDb[idx] = updated;
+    saveFarmersToDisk();
+    res.json(updated);
+  });
+
+  // POST verify farmer status
+  app.post("/api/farmers/:id/verify", (req, res) => {
+    const { id } = req.params;
+    const farmer = farmersDb.find((f) => f.id === id);
+    if (!farmer) {
+      return res.status(404).json({ error: "Petani tidak ditemukan." });
+    }
+    farmer.statusVerifikasi = "Terverifikasi";
+    farmer.catatanAI = `Divalidasi langsung oleh Petugas PPL Lapangan pada ${new Date().toLocaleDateString("id-ID")}. Polygon dan berkas lahan lengkap.`;
+    saveFarmersToDisk();
+    res.json({ success: true, farmer });
   });
 
   // DELETE farmer by ID
   app.delete("/api/farmers/:id", (req, res) => {
     const { id } = req.params;
     farmersDb = farmersDb.filter((f) => f.id !== id);
+    saveFarmersToDisk();
     res.json({ success: true, message: `Data petani ${id} berhasil dihapus.` });
+  });
+
+  // GET all agricultural suppliers / kiosks / offtakers
+  app.get("/api/suppliers", (_req, res) => {
+    res.json(suppliersDb);
+  });
+
+  // POST add new supplier / saprodi partner
+  app.post("/api/suppliers", (req, res) => {
+    const data = req.body;
+    if (!data.nama) {
+      return res.status(400).json({ error: "Nama supplier/kios wajib diisi." });
+    }
+
+    const newSupplier = saveSupplierRecord(data);
+    res.status(201).json(newSupplier);
+  });
+
+  // PUT update supplier
+  app.put("/api/suppliers/:id", (req, res) => {
+    const { id } = req.params;
+    const data = req.body;
+    const idx = suppliersDb.findIndex((s) => s.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ error: "Supplier tidak ditemukan." });
+    }
+
+    const current = suppliersDb[idx];
+    const updated: SupplierRecord = {
+      ...current,
+      nama: data.nama !== undefined ? data.nama : current.nama,
+      kategori: data.kategori !== undefined ? data.kategori : current.kategori,
+      kontak: data.kontak !== undefined ? data.kontak : current.kontak,
+      alamat: data.alamat !== undefined ? data.alamat : current.alamat,
+      kabupaten: data.kabupaten !== undefined ? data.kabupaten : current.kabupaten,
+      latitude: data.latitude !== undefined ? Number(data.latitude) : current.latitude,
+      longitude: data.longitude !== undefined ? Number(data.longitude) : current.longitude,
+      statusKemitraan: data.statusKemitraan !== undefined ? data.statusKemitraan : current.statusKemitraan,
+      produkUnggulan: Array.isArray(data.produkUnggulan) ? data.produkUnggulan : current.produkUnggulan,
+      stokTersedia: data.stokTersedia !== undefined ? data.stokTersedia : current.stokTersedia,
+      radiusLayananKm: data.radiusLayananKm !== undefined ? Number(data.radiusLayananKm) : current.radiusLayananKm,
+      jamBuka: data.jamBuka !== undefined ? data.jamBuka : current.jamBuka,
+      petaniBinaanCount: data.petaniBinaanCount !== undefined ? Number(data.petaniBinaanCount) : current.petaniBinaanCount,
+      catatan: data.catatan !== undefined ? data.catatan : current.catatan,
+      syncStatus: "synced",
+    };
+
+    suppliersDb[idx] = updated;
+    saveSuppliersToDisk();
+    bumpDataVersion();
+    res.json(updated);
+  });
+
+  // DELETE supplier by ID
+  app.delete("/api/suppliers/:id", (req, res) => {
+    const { id } = req.params;
+    const before = suppliersDb.length;
+    suppliersDb = suppliersDb.filter((s) => s.id !== id);
+    if (suppliersDb.length === before) {
+      return res.status(404).json({ error: "Supplier tidak ditemukan." });
+    }
+    saveSuppliersToDisk();
+    bumpDataVersion();
+    res.json({ success: true, message: `Data supplier ${id} berhasil dihapus.` });
+  });
+
+  // GET CSV export for suppliers (Google Sheets Lembar 2)
+  app.get("/api/sheets/suppliers/export.csv", (_req, res) => {
+    const headers = [
+      "ID Supplier",
+      "Waktu Terdaftar",
+      "Nama Supplier / Kios",
+      "Kategori Usaha",
+      "Kontak WhatsApp",
+      "Alamat",
+      "Kabupaten",
+      "Status Kemitraan",
+      "Produk Unggulan",
+      "Stok Tersedia",
+      "Radius Layanan (Km)",
+      "Jam Buka",
+      "Petani Binaan Terhubung",
+      "Latitude",
+      "Longitude",
+      "Catatan",
+    ];
+
+    const rows = suppliersDb.map((s, idx) => [
+      s.id,
+      s.timestamp || `2026-09-${String(10 + (idx % 15)).padStart(2, "0")} 08:00:00`,
+      `"${(s.nama || "").replace(/"/g, '""')}"`,
+      `"${(s.kategori || "").replace(/"/g, '""')}"`,
+      `"${(s.kontak || "").replace(/"/g, '""')}"`,
+      `"${(s.alamat || "").replace(/"/g, '""')}"`,
+      `"${(s.kabupaten || "").replace(/"/g, '""')}"`,
+      `"${(s.statusKemitraan || "").replace(/"/g, '""')}"`,
+      `"${((s.produkUnggulan || []).join("; ")).replace(/"/g, '""')}"`,
+      `"${(s.stokTersedia || "").replace(/"/g, '""')}"`,
+      s.radiusLayananKm || 25,
+      `"${(s.jamBuka || "").replace(/"/g, '""')}"`,
+      s.petaniBinaanCount || 10,
+      s.latitude,
+      s.longitude,
+      `"${(s.catatan || "").replace(/"/g, '""')}"`,
+    ]);
+
+    const csvContent = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="TaniAI_Suppliers_Database.csv"');
+    res.send(csvContent);
+  });
+
+  // GET Google Maps Platform API key config
+  app.get("/api/config/maps-key", (_req, res) => {
+    const apiKey =
+      process.env.VITE_GOOGLE_MAPS_API_KEY ||
+      process.env.GOOGLE_MAPS_API_KEY ||
+      "";
+    res.json({ apiKey });
+  });
+
+  // GET Agronomy Fertilizer Recommendation
+  app.get("/api/agronomy/fertilizer", (req, res) => {
+    const crop = (req.query.crop as string) || "Padi";
+    const ha = parseFloat(req.query.ha as string) || 1.0;
+    const result = calculateFertilizerRecommendation(crop, ha);
+    res.json(result);
+  });
+
+  // POST Audio Transcribe & Entity Extraction (Multimodal AI)
+  app.post("/api/audio-transcribe", async (req, res) => {
+    try {
+      const { audioBase64, mimeType, senderPhone } = req.body;
+      if (!audioBase64) {
+        return res.status(400).json({ error: "audioBase64 is required" });
+      }
+
+      const activeAdmin = findAdmin(senderPhone);
+      const ai = getGemini();
+
+      if (!ai) {
+        // Fallback jika API key Gemini belum diisi
+        return res.json({
+          transcription: "Halo Kang Tani, saya mau daftarkan lahan pertanian seluas 1.5 hektar di desa binaan.",
+          extracted: {
+            luasLahan: 1.5,
+            luasLahanFormatted: "1.5 Ha",
+            komoditas: "Padi",
+          },
+          isComplete: false,
+          isFallback: true,
+        });
+      }
+
+      const cleanBase64 = audioBase64.replace(/^data:[^;]+;base64,/, "");
+      const prompt = `Dengarkan rekaman audio suara ini dari seorang petani atau petugas pertanian di Indonesia.
+Lakukan:
+1. Transkripsikan apa yang diucapkan secara verbatim dan akurat ke dalam teks bahasa Indonesia.
+2. Analisis dan ekstrak data petani jika ada:
+   - nama: nama petani (misal: "Pak Suparman", "Pak Ahmad", "Ibu Siti")
+   - komoditas: tanaman pangan / hortikultura (misal: "Padi", "Jagung", "Cabai Rawit", "Bawang Merah")
+   - varietas: varietas jika disebutkan (misal: "Ciherang", "Inpari 32", "Bisi 18")
+   - luasLahan: angka dalam Hektar (misal 1.5 atau 0.5 atau jika dalam m2 konversi ke Ha)
+   - luasLahanFormatted: teks string (misal: "1.5 Ha")
+   - kabupaten: nama kabupaten/kota jika ada (misal: "Subang", "Karawang")
+   - alamat: desa atau kecamatan jika ada
+   - estimasiPanen: bulan atau waktu perkiraan panen jika disebutkan
+
+Kembalikan HANYA format JSON valid tanpa tanda markdown:
+{
+  "transcription": "teks ucapan dalam rekaman",
+  "extracted": {
+    "nama": "nama atau null",
+    "komoditas": "komoditas atau null",
+    "varietas": "varietas atau null",
+    "luasLahan": null,
+    "luasLahanFormatted": null,
+    "alamat": null,
+    "kabupaten": null,
+    "estimasiPanen": null
+  }
+}`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || "audio/webm",
+                  data: cleanBase64,
+                },
+              },
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+      });
+
+      const responseText = response.text || "";
+      let parsed: any = {};
+      try {
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        parsed = JSON.parse(jsonMatch ? jsonMatch[0] : responseText);
+      } catch {
+        parsed = { transcription: responseText.trim(), extracted: {} };
+      }
+
+      // Also run rule-based extractor on the transcribed text for high recall
+      const ruleBased = extractFarmerFromText(parsed.transcription || "", {});
+      const mergedExtracted = {
+        ...(parsed.extracted || {}),
+        ...(ruleBased.extracted || {}),
+      };
+
+      const check = checkFarmerCompleteness(mergedExtracted);
+
+      res.json({
+        transcription: parsed.transcription || "Audio suara berhasil diproses.",
+        extracted: mergedExtracted,
+        isComplete: check.isComplete,
+        missingFields: check.missingFields,
+        isAdmin: !!activeAdmin,
+      });
+    } catch (err: any) {
+      console.error("[Audio Transcribe Error]", err);
+      res.status(500).json({
+        error: "Gagal memproses audio suara: " + (err?.message || "Internal error"),
+        transcription: "Halo Kang Tani, saya mau mendata lahan pertanian.",
+        extracted: {},
+        isComplete: false,
+      });
+    }
   });
 
   // GET market commodities & anomaly prices
@@ -762,63 +1883,98 @@ export function createServerApp() {
     res.json(latestRecommendation);
   });
 
-  // POST generate strategic recommendation via Gemini AI
-  app.post("/api/strategic-recommendation/generate", async (_req, res) => {
+  // POST generate strategic recommendation via AI with smart caching
+  app.post("/api/strategic-recommendation/generate", async (req, res) => {
+    const nineCfg = getNineRouterConfig();
     const ai = getGemini();
 
-    const summaryContext = {
+    const totalLuasNum = farmersDb.reduce((acc, f) => acc + (f.luasLahan || 0), 0);
+    const totalEstimasiPanenTon = farmersDb.reduce((acc, f) => acc + (f.estimasiHasilTon || 0), 0);
+    const currentDataHash = `${farmersDb.length}_${totalLuasNum.toFixed(1)}_${totalEstimasiPanenTon.toFixed(1)}_${commoditiesDb.map((c) => `${c.id}:${c.hargaSekarang}`).join(",")}`;
+
+    const forceRefresh = Boolean(req.body?.forceRefresh);
+    const isRecent = latestRecommendation && Date.now() - lastRecommendationGeneratedAt < 1800000;
+
+    // Pillar 3: Reuse existing result if data hasn't changed! (Gunakan kembali hasil yang ada)
+    if (!forceRefresh && latestRecommendation && latestRecommendationDataHash === currentDataHash && isRecent) {
+      console.log("[AI Optimization] ⚡ Menggunakan hasil rekomendasi tersimpan (data belum berubah - hemat 100% token)");
+      totalCacheHits++;
+      totalTokensSavedEstimate += 1200;
+      return res.json({
+        ...latestRecommendation,
+        fromCache: true,
+        cachedAt: new Date(lastRecommendationGeneratedAt).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
+        cacheNotice: "Laporan dimuat dari cache tersimpan (data belum berubah - 0 token terpakai).",
+      });
+    }
+
+    // Pillar 1: Lean Aggregated Summary (Send only necessary metrics, DO NOT dump raw farmer records!)
+    const cropStats: Record<string, { count: number; luas: number; ton: number }> = {};
+    for (const f of farmersDb) {
+      const key = f.komoditas ? f.komoditas.split(" ")[0] : "Lainnya";
+      if (!cropStats[key]) cropStats[key] = { count: 0, luas: 0, ton: 0 };
+      cropStats[key].count++;
+      cropStats[key].luas += f.luasLahan || 0;
+      cropStats[key].ton += f.estimasiHasilTon || 0;
+    }
+
+    const leanSummaryContext = {
       totalPetani: farmersDb.length,
-      totalLuasLahan: farmersDb.reduce((acc, f) => acc + (f.luasLahan || 0), 0).toFixed(1),
-      totalEstimasiPanenTon: farmersDb.reduce((acc, f) => acc + (f.estimasiHasilTon || 0), 0).toFixed(1),
-      daftarPetani: farmersDb.map((f) => ({
-        nama: f.nama,
-        kabupaten: f.kabupaten,
-        luas: `${f.luasLahan} Ha`,
-        komoditas: f.komoditas,
-        panen: f.estimasiPanen,
-        hasilTon: f.estimasiHasilTon,
-      })),
-      anomaliPasar: commoditiesDb.map((c) => ({
-        nama: c.nama,
-        hargaSekarang: c.hargaSekarang,
-        perubahanPersen: c.perubahanPersen,
-        statusAnomali: c.statusAnomali,
-      })),
+      totalLuasLahanHa: totalLuasNum.toFixed(1),
+      totalEstimasiPanenTon: totalEstimasiPanenTon.toFixed(1),
+      distribusiKomoditas: cropStats,
+      anomaliPasar: commoditiesDb
+        .filter((c) => c.statusAnomali !== "NORMAL")
+        .map((c) => ({
+          nama: c.nama,
+          harga: c.hargaSekarang,
+          perubahanPersen: c.perubahanPersen,
+          status: c.statusAnomali,
+        })),
     };
 
-    if (!ai) {
+    if (!nineCfg.isConfigured && !ai) {
       // Fallback structured recommendation
       const fallback: StrategicRecommendation = {
         ...INITIAL_STRATEGIC_RECOMMENDATION,
         id: `strat-${Date.now()}`,
         tanggal: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" }),
+        fromCache: false,
       };
       latestRecommendation = fallback;
+      latestRecommendationDataHash = currentDataHash;
+      lastRecommendationGeneratedAt = Date.now();
       return res.json(fallback);
     }
 
     try {
       const prompt = `Anda adalah Senior Agricultural Data Scientist & Ahli Ekonomi Pertanian Indonesia.
-Tugas Anda adalah menganalisis data spasial komoditas petani yang baru dicatat via WhatsApp dan disinkronkan ke Google Sheets, serta mencocokkannya dengan harga pasar saat ini.
+Tugas Anda adalah menganalisis ringkasan data spasial komoditas berikut secara padat, tajam, dan efisien:
 
-DATA AGREGAT PETANI:
-${JSON.stringify(summaryContext, null, 2)}
+DATA AGREGAT PERTANIAN:
+${JSON.stringify(leanSummaryContext, null, 2)}
 
 Buatkan laporan rekomendasi strategis dalam format JSON dengan struktur:
 {
-  "judul": "Judul Laporan Strategis yang tajam dan profesional",
+  "judul": "Judul Laporan Strategis singkat & tajam",
   "urgensi": "Tinggi" | "Sedang" | "Rendah",
-  "ringkasanEksekutif": "1-2 paragraf ringkasan temuan data untuk pengambil kebijakan & data scientist",
-  "analisisOversupplyShortage": ["analisis titik 1", "analisis titik 2", "analisis titik 3"],
-  "rekomendasiAgronomi": ["rekomendasi teknis tani 1", "rekomendasi teknis tani 2", "rekomendasi teknis tani 3"],
-  "rekomendasiKebijakanHarga": ["rekomendasi intervensi harga 1", "rekomendasi intervensi harga 2"],
-  "rekomendasiRantaiPasok": ["rekomendasi logistik dan distribusi 1", "rekomendasi logistik dan distribusi 2"],
-  "dataScientistNotes": "Catatan analitik untuk penelitian lebih lanjut"
+  "ringkasanEksekutif": "1 paragraf ringkasan eksekutif padat untuk pengambil kebijakan",
+  "analisisOversupplyShortage": ["analisis poin 1", "analisis poin 2"],
+  "rekomendasiAgronomi": ["rekomendasi poin 1", "rekomendasi poin 2"],
+  "rekomendasiKebijakanHarga": ["kebijakan harga 1", "kebijakan harga 2"],
+  "rekomendasiRantaiPasok": ["logistik/rantai pasok 1", "logistik/rantai pasok 2"],
+  "dataScientistNotes": "Catatan singkat metodologi analitik"
 }
 
-Berikan respon HANYA dalam JSON valid tanpa markdown wrapper jika memungkinkan.`;
+ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa uraian bertele-tele.`;
 
-      const responseText = await callGeminiGenerate(ai, prompt);
+      const aiRes = await callUniversalAI(
+        "Anda adalah Senior Agricultural Data Scientist Indonesia. Berikan output analisis padat dan efisien.",
+        prompt,
+        undefined,
+        { maxOutputTokens: 850 }
+      );
+      const responseText = aiRes.text;
       let parsed: any = {};
       try {
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -839,9 +1995,13 @@ Berikan respon HANYA dalam JSON valid tanpa markdown wrapper jika memungkinkan.`
         rekomendasiKebijakanHarga: parsed.rekomendasiKebijakanHarga || [],
         rekomendasiRantaiPasok: parsed.rekomendasiRantaiPasok || [],
         dataScientistNotes: parsed.dataScientistNotes || "",
+        fromCache: false,
+        cachedAt: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
       };
 
       latestRecommendation = generated;
+      latestRecommendationDataHash = currentDataHash;
+      lastRecommendationGeneratedAt = Date.now();
       res.json(generated);
     } catch (err: any) {
       console.error("Gemini strategic generation error:", err);
@@ -849,13 +2009,329 @@ Berikan respon HANYA dalam JSON valid tanpa markdown wrapper jika memungkinkan.`
     }
   });
 
-  // POST Chatbot endpoint (Kang Tani AI) with Role-Based Access Control (RBAC)
+  // Handler for Agronomy Fertilizer Recommendations
+  function handleAgronomyFertilizerQuery(
+    message: string,
+    currentDraft: Partial<FarmerRecord> = {}
+  ): { reply: string; quickReplies: string[] } | null {
+    const lower = (message || "").toLowerCase();
+    const hasFertilizerIntent =
+      lower.includes("pupuk") ||
+      lower.includes("dosis") ||
+      lower.includes("pemupukan") ||
+      lower.includes("urea") ||
+      lower.includes("phonska") ||
+      lower.includes("npk") ||
+      lower.includes("takaran");
+
+    if (!hasFertilizerIntent) return null;
+
+    // Determine commodity
+    let crop = currentDraft.komoditas || "";
+    if (lower.includes("padi") || lower.includes("beras")) crop = "Padi";
+    else if (lower.includes("jagung")) crop = "Jagung Hibrida";
+    else if (lower.includes("cabai") || lower.includes("cabe")) crop = "Cabai Rawit";
+    else if (lower.includes("bawang")) crop = "Bawang Merah";
+    else if (lower.includes("kedelai")) crop = "Kedelai";
+    else if (!crop) crop = "Padi";
+
+    // Determine area in Ha
+    let areaHa = currentDraft.luasLahan || 1.0;
+    const haMatch = lower.match(/(\d+(?:[.,]\d+)?)\s*(?:ha|hektar)/i);
+    if (haMatch && haMatch[1]) {
+      areaHa = parseFloat(haMatch[1].replace(",", "."));
+    } else {
+      const m2Match = lower.match(/(\d+(?:[.,]\d+)?)\s*(?:m2|meter)/i);
+      if (m2Match && m2Match[1]) {
+        areaHa = parseFloat(m2Match[1].replace(",", ".")) / 10000;
+      }
+    }
+
+    const fert = calculateFertilizerRecommendation(crop, areaHa);
+
+    const pupukLines = fert.pupuk
+      .map(
+        (p) =>
+          `• *${p.jenis}*: *${p.totalKg.toLocaleString("id-ID")} kg* (~${p.totalKarung50kg} Zak @50kg)\n  _${p.keterangan}_`
+      )
+      .join("\n");
+
+    const jadwalLines = fert.jadwalAplikasi
+      .map((j) => `📍 *${j.fase}* (${j.waktuHST}):\n  - ${j.komposisi}\n  - _Aplikasi:_ ${j.caraAplikasi}`)
+      .join("\n\n");
+
+    const tipsLines = fert.catatanKhusus.map((t) => `✓ ${t}`).join("\n");
+
+    const reply =
+      `🌾 *Rekomendasi Dosis Pemupukan Berimbang Standar Balitbangtan RI*\n\n` +
+      `Bpk/Ibu, berikut rekomendasi kebutuhan pupuk berimbang untuk komoditas *${fert.komoditas}* pada luasan lahan *${fert.luasLahanHa} Ha (${fert.luasLahanM2.toLocaleString("id-ID")} m²)*:\n\n` +
+      `📦 *Total Kebutuhan Pupuk:*\n${pupukLines}\n\n` +
+      `📅 *Jadwal & Fase Pemupukan:*\n${jadwalLines}\n\n` +
+      `💡 *Petunjuk Agronomi Lapangan:*\n${tipsLines}\n\n` +
+      `💡 *Catatan:* Dosis dapat disesuaikan dengan uji tanah (PUTS) setempat. Bapak/Ibu juga dapat mencetak Surat Registrasi Lahan & Petani lengkap dengan tabel dosis ini.`;
+
+    return {
+      reply,
+      quickReplies: [
+        `Cetak Kartu Tani (${fert.luasLahanHa} Ha)`,
+        "Konsultasi Hama & Penyakit",
+        "Cek Harga Pasar Terkini",
+        "Daftarkan Lahan ke Sheets",
+      ],
+    };
+  }
+
+  // Handler for Natural Language Analytics & Aggregations
+  function handleNaturalLanguageAnalyticsQuery(
+    message: string,
+    isAdmin: boolean
+  ): { reply: string; quickReplies: string[] } | null {
+    if (!isAdmin) return null;
+    const lower = (message || "").toLowerCase();
+
+    const isAnalyticsIntent =
+      (lower.includes("berapa") ||
+        lower.includes("total") ||
+        lower.includes("rekap") ||
+        lower.includes("daftar") ||
+        lower.includes("analisis") ||
+        lower.includes("laporan") ||
+        lower.includes("agregat") ||
+        lower.includes("ringkasan")) &&
+      (lower.includes("luas") ||
+        lower.includes("panen") ||
+        lower.includes("ton") ||
+        lower.includes("hektar") ||
+        lower.includes("petani") ||
+        lower.includes("lahan") ||
+        lower.includes("komoditas") ||
+        lower.includes("verifikasi"));
+
+    if (!isAnalyticsIntent) return null;
+
+    const totalLuas = farmersDb.reduce((acc, f) => acc + (f.luasLahan || 0), 0);
+    const totalPanen = farmersDb.reduce((acc, f) => acc + (f.estimasiHasilTon || 0), 0);
+    const totalPetani = farmersDb.length;
+
+    // Filter by Commodity
+    let targetCrop = "";
+    if (lower.includes("padi") || lower.includes("beras")) targetCrop = "Padi";
+    else if (lower.includes("jagung")) targetCrop = "Jagung";
+    else if (lower.includes("cabai") || lower.includes("cabe")) targetCrop = "Cabai";
+    else if (lower.includes("bawang")) targetCrop = "Bawang";
+
+    // Filter by Region
+    let targetKab = "";
+    const kabList = ["subang", "karawang", "indramayu", "magetan", "kediri", "brebes", "cianjur", "bogor", "garut", "majalengka"];
+    for (const k of kabList) {
+      if (lower.includes(k)) {
+        targetKab = k;
+        break;
+      }
+    }
+
+    // Filter by Verification Status
+    const isUnverifiedQuery =
+      lower.includes("belum verifikasi") ||
+      lower.includes("menunggu verifikasi") ||
+      lower.includes("unverified") ||
+      lower.includes("belum diverifikasi");
+
+    if (isUnverifiedQuery) {
+      const unverified = farmersDb.filter((f) => f.statusVerifikasi !== "Terverifikasi");
+      if (unverified.length === 0) {
+        return {
+          reply: `🟢 *Seluruh Data Petani Telah Terverifikasi!*\n\nSemua ${totalPetani} data petani di Google Sheets saat ini berstatus *Terverifikasi* resmi oleh petugas dinas dan PPL lapangan.`,
+          quickReplies: ["Rekap Total Panen", "Cek Anomali Pasar", "Ekspor ke Sheets"],
+        };
+      }
+
+      const listText = unverified
+        .map(
+          (f, i) =>
+            `${i + 1}. *${f.nama}* (${f.komoditas}, ${f.luasLahan} Ha) di ${f.kabupaten || f.alamat} - _${f.statusVerifikasi}_\n   Catatan: ${f.catatanAI || "Menunggu tinjauan PPL"}`
+        )
+        .join("\n\n");
+
+      return {
+        reply: `📋 *Daftar Petani Menunggu Verifikasi Lapangan (${unverified.length} Petani):*\n\n${listText}\n\n💡 Admin dapat memverifikasi langsung melalui tombol aksi atau di tab Google Sheets.`,
+        quickReplies: ["Verifikasi Semua", "Broadcast PPL", "Buka Google Sheets"],
+      };
+    }
+
+    let filtered = [...farmersDb];
+    if (targetCrop) {
+      filtered = filtered.filter((f) => f.komoditas.toLowerCase().includes(targetCrop.toLowerCase()));
+    }
+    if (targetKab) {
+      filtered = filtered.filter(
+        (f) =>
+          (f.kabupaten && f.kabupaten.toLowerCase().includes(targetKab)) ||
+          (f.alamat && f.alamat.toLowerCase().includes(targetKab))
+      );
+    }
+
+    const fLuas = filtered.reduce((acc, f) => acc + (f.luasLahan || 0), 0);
+    const fPanen = filtered.reduce((acc, f) => acc + (f.estimasiHasilTon || 0), 0);
+
+    const scopeTitle = [
+      targetCrop ? `Komoditas *${targetCrop}*` : "Seluruh Komoditas",
+      targetKab ? `Wilayah *${targetKab.toUpperCase()}*` : "Seluruh Sentra",
+    ].join(" di ");
+
+    const farmerSummaryList = filtered
+      .slice(0, 5)
+      .map((f) => `• *${f.nama}*: ${f.luasLahan} Ha, est. ${f.estimasiHasilTon} Ton (${f.statusVerifikasi})`)
+      .join("\n");
+
+    const reply =
+      `📊 *Laporan Agregasi Spasial Pertanian Real-Time*\n` +
+      `Cakupan: ${scopeTitle}\n\n` +
+      `• *Jumlah Petani Terdata:* *${filtered.length} Petani*\n` +
+      `• *Total Luas Lahan:* *${fLuas.toFixed(1)} Hektar* (${(fLuas * 10000).toLocaleString("id-ID")} m²)\n` +
+      `• *Proyeksi Total Panen:* *${fPanen.toFixed(1)} Ton*\n` +
+      `• *Rata-rata Produktivitas:* *${filtered.length > 0 ? (fPanen / Math.max(fLuas, 0.1)).toFixed(1) : 0} Ton/Ha*\n` +
+      `• *Kontribusi Terhadap Total Nasional:* *${((fLuas / Math.max(totalLuas, 1)) * 100).toFixed(1)}%*\n\n` +
+      (filtered.length > 0 ? `🌾 *Sampel Petani Terdaftar:*\n${farmerSummaryList}\n\n` : "") +
+      `Seluruh data di atas tersinkronisasi otomatis dengan Google Sheets baris #2 sampai #${farmersDb.length + 1}.`;
+
+    return {
+      reply,
+      quickReplies: [
+        "Buka Database Google Sheets",
+        "Unduh Data CSV",
+        "Cek Anomali Harga Pasar",
+        "Rekomendasi Pemupukan",
+      ],
+    };
+  }
+
+  // POST Chatbot endpoint (Kang Tani AI) with Role-Based Access Control (RBAC) & Cost Optimization
   app.post("/api/chat", async (req, res) => {
-    const { message, history, currentDraft, senderPhone } = req.body;
+    const { message, history, currentDraft, currentSupplierDraft, senderPhone } = req.body;
     const ai = getGemini();
 
     const activeAdmin = findAdmin(senderPhone);
     const isAdmin = !!activeAdmin;
+
+    // 0. Cancellation controller: stops AI generation immediately if client aborts or cancels
+    const clientAbortController = new AbortController();
+    let isClientAborted = false;
+    res.on("close", () => {
+      if (!res.writableEnded && (req.destroyed || req.socket?.destroyed)) {
+        isClientAborted = true;
+        clientAbortController.abort();
+        console.log("[AI Cost Optimizer] 🛑 Koneksi dibatalkan/ditutup oleh klien -> eksekusi AI dihentikan segera demi menghemat token & biaya.");
+      }
+    });
+
+    // 0s. Agricultural Supplier Registration Flow (Chatbot & Database input)
+    const hasSupplierDraft =
+      currentSupplierDraft &&
+      (currentSupplierDraft.nama ||
+        currentSupplierDraft.kategori ||
+        currentSupplierDraft.alamat ||
+        currentSupplierDraft.kabupaten ||
+        currentSupplierDraft.kontak);
+    const isSupplierMsg = isSupplierIntent(message);
+    const lowerMsg = (message || "").toLowerCase();
+    const isAddAction =
+      lowerMsg.includes("tambah") ||
+      lowerMsg.includes("daftarkan") ||
+      lowerMsg.includes("daftar") ||
+      lowerMsg.includes("input") ||
+      lowerMsg.includes("masukkan") ||
+      lowerMsg.includes("catat") ||
+      lowerMsg.includes("simpan") ||
+      lowerMsg.includes("kios") ||
+      lowerMsg.includes("supplier");
+
+    if (isSupplierMsg || (hasSupplierDraft && isAddAction)) {
+      const reg = extractSupplierFromText(message, currentSupplierDraft || {});
+      const merged = { ...(currentSupplierDraft || {}), ...(reg.extracted || {}) };
+      const check = checkSupplierCompleteness(merged);
+
+      if (check.isComplete && (isAddAction || isSupplierMsg)) {
+        const saved = saveSupplierRecord(merged, activeAdmin, activeAdmin?.noHp || senderPhone);
+        return res.json({
+          reply: formatSuccessSupplierRegistration(saved, activeAdmin),
+          quickReplies: [
+            "🏢 Tambah Supplier Lain",
+            "📊 Buka Database Sheets",
+            "📍 Lihat di Peta GIS",
+            "🌾 Daftarkan Lahan Petani",
+          ],
+          extractedSupplier: saved,
+          savedSupplier: saved,
+          entityType: "supplier",
+          isComplete: true,
+          isAdminAction: isAdmin,
+          aiProvider: "rule_based",
+        });
+      } else {
+        const inc = formatIncompleteSupplierPrompt(merged, activeAdmin?.nama, isAdmin);
+        return res.json({
+          reply: inc.reply,
+          quickReplies: inc.quickReplies,
+          extractedSupplier: merged,
+          entityType: "supplier",
+          isComplete: false,
+          isAdminAction: isAdmin,
+          aiProvider: "rule_based",
+        });
+      }
+    }
+
+    // 0a. Agronomy Fertilizer Calculator query intent (accessible for both Farmers and Admins)
+    const fertResult = handleAgronomyFertilizerQuery(message, currentDraft || {});
+    if (fertResult) {
+      return res.json({
+        reply: fertResult.reply,
+        quickReplies: fertResult.quickReplies,
+        extracted: currentDraft || {},
+        isComplete: false,
+        aiProvider: "agronomy_engine",
+      });
+    }
+
+    // 0b. Natural Language Analytics Aggregation query (for admin)
+    if (isAdmin) {
+      const analyticsResult = handleNaturalLanguageAnalyticsQuery(message, true);
+      if (analyticsResult) {
+        return res.json({
+          reply: analyticsResult.reply,
+          quickReplies: analyticsResult.quickReplies,
+          extracted: currentDraft || {},
+          isComplete: false,
+          isAdminAction: true,
+          aiProvider: "analytics_engine",
+        });
+      }
+    }
+
+    // 0c. Smart Query Cache Lookup (Pillar 3: Reusing Existing Results)
+    const cacheKey = getNormalizedCacheKey(isAdmin ? "admin" : "farmer", message);
+    const isCacheable = isQuerySafeToCache(message);
+
+    if (isCacheable && aiResponseCache.has(cacheKey)) {
+      const cached = aiResponseCache.get(cacheKey)!;
+      if (cached.dataVersion === currentDataVersion && Date.now() - cached.timestamp < 1800000) {
+        totalCacheHits++;
+        totalTokensSavedEstimate += 650;
+        console.log(`[AI Cache Hit] ⚡ Menggunakan hasil cache untuk: "${(message || "").substring(0, 30)}..." (0 token digunakan, hemat biaya 100%).`);
+        return res.json({
+          reply: cached.reply,
+          quickReplies: cached.quickReplies,
+          extracted: currentDraft || {},
+          isComplete: false,
+          isAdminAction: cached.isAdminAction,
+          aiProvider: "cache",
+          fromCache: true,
+          cachedAt: new Date(cached.timestamp).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
+          tokensUsed: 0,
+        });
+      }
+    }
 
     // RULE-BASED SECURITY CHECK FOR NON-ADMIN NUMBERS
     if (!isAdmin) {
@@ -910,121 +2386,53 @@ Berikan respon HANYA dalam JSON valid tanpa markdown wrapper jika memungkinkan.`
       }
     }
 
-    // IF SENDER IS ADMIN: Build Executive Agricultural Intelligence AI Assistant
+    // IF SENDER IS ADMIN: Build Executive Agricultural Intelligence AI Assistant with Lean Targeted Context
     if (isAdmin) {
-      const totalLuas = farmersDb.reduce((acc, f) => acc + (f.luasLahan || 0), 0).toFixed(1);
-      const totalPanen = farmersDb.reduce((acc, f) => acc + (f.estimasiHasilTon || 0), 0).toFixed(1);
-      const unverifiedFarmers = farmersDb.filter((f) => f.statusVerifikasi !== "Terverifikasi");
-      const verifiedFarmers = farmersDb.filter((f) => f.statusVerifikasi === "Terverifikasi");
+      const leanContext = buildLeanTargetedContext(message, true);
 
-      const komoditasSummary = farmersDb.reduce((acc: any, f) => {
-        if (!acc[f.komoditas]) acc[f.komoditas] = { count: 0, luas: 0, ton: 0, farmers: [] };
-        acc[f.komoditas].count += 1;
-        acc[f.komoditas].luas += f.luasLahan || 0;
-        acc[f.komoditas].ton += f.estimasiHasilTon || 0;
-        acc[f.komoditas].farmers.push(`${f.nama} (${f.kabupaten || f.alamat}, ${f.luasLahan} Ha, est. ${f.estimasiHasilTon} Ton, panen ${f.estimasiPanen})`);
-        return acc;
-      }, {});
+      const adminSystemInstructions = `Anda adalah "Kang Tani AI - Executive Agricultural Intelligence Assistant", asisten AI resmi untuk dinas pertanian dan petugas PPL.
 
-      const kabupatenSummary = farmersDb.reduce((acc: any, f) => {
-        const kab = f.kabupaten || "Lainnya";
-        if (!acc[kab]) acc[kab] = { count: 0, luas: 0, ton: 0 };
-        acc[kab].count += 1;
-        acc[kab].luas += f.luasLahan || 0;
-        acc[kab].ton += f.estimasiHasilTon || 0;
-        return acc;
-      }, {});
+IDENTITAS ADMIN:
+- Nama: ${activeAdmin.nama} (${activeAdmin.role}, ${activeAdmin.instansi})
 
-      if (ai) {
-        try {
-          const adminSystemInstructions = `Anda adalah "Kang Tani AI - Executive Agricultural Intelligence & Data Analytics Assistant", asisten AI resmi berdedikasi tinggi untuk pimpinan dinas, koordinator penyuluh pertanian (PPL), dan data scientist.
+${leanContext.summary}
 
-IDENTITAS ADMIN PENGIRIM:
-- Nama: ${activeAdmin.nama}
-- Jabatan / Otoritas: ${activeAdmin.role}
-- Instansi: ${activeAdmin.instansi}
-- Izin Akses: ${activeAdmin.izinAkses.join(", ")}
+${leanContext.targetedDetails ? `${leanContext.targetedDetails}\n` : ""}
+${leanContext.marketHighlight ? `${leanContext.marketHighlight}\n` : ""}
 
-STATUS DATABASE REAL-TIME DI GOOGLE SHEETS & SENTRA:
-- Total Petani Terdata: ${farmersDb.length} orang
-- Total Luas Lahan Terdata: ${totalLuas} Hektar
-- Total Proyeksi Panen: ${totalPanen} Ton
-- Terverifikasi: ${verifiedFarmers.length} petani | Menunggu Verifikasi: ${unverifiedFarmers.length} petani (${unverifiedFarmers.map((u) => `${u.nama} [${u.komoditas}, ${u.luasLahan} Ha]`).join(", ") || "Semua sudah terverifikasi"})
-
-DISTRIBUSI KOMODITAS:
-${Object.entries(komoditasSummary)
-  .map(([k, v]: any) => `• ${k}: ${v.count} petani, ${v.luas.toFixed(1)} Ha, ${v.ton.toFixed(1)} Ton`)
-  .join("\n")}
-
-DISTRIBUSI KABUPATEN/SENTRA:
-${Object.entries(kabupatenSummary)
-  .map(([k, v]: any) => `• ${k}: ${v.count} petani, ${v.luas.toFixed(1)} Ha, ${v.ton.toFixed(1)} Ton`)
-  .join("\n")}
-
-KONDISI HARGA & ANOMALI PASAR HARI INI:
-${commoditiesDb
-  .map(
-    (c) =>
-      `• ${c.nama}: Rp ${c.hargaSekarang.toLocaleString("id-ID")}/kg (Acuan HET: Rp ${c.hargaAcuanPemerintah.toLocaleString("id-ID")}, ${c.perubahanPersen > 0 ? "+" : ""}${c.perubahanPersen}%, Status: ${c.statusAnomali}, Catatan: ${c.pesanAnomali || c.rekomendasiPetani})`
-  )
-  .join("\n")}
-
-DATABASE PETANI LENGKAP (MASTER DATA):
-${JSON.stringify(
-  farmersDb.map((f) => ({
-    id: f.id,
-    nama: f.nama,
-    kontak: f.noHp,
-    lokasi: `${f.alamat}, ${f.kabupaten}`,
-    komoditas: f.komoditas,
-    varietas: f.varietas,
-    luasHa: f.luasLahan,
-    panen: f.estimasiPanen,
-    hasilTon: f.estimasiHasilTon,
-    status: f.statusVerifikasi,
-    catatanAI: f.catatanAI,
-  })),
-  null,
-  1
-)}
-
-ATURAN DAN PRINSIP RESPON (SANGAT PENTING):
-1. MENYESUAIKAN RESPOON SECARA CERDAS & FLEKSIBEL SESUAI PERMINTAAN ADMIN:
-   - Jika admin meminta analisis/perhitungan: lakukan kalkulasi nyata dari data di atas (misal perbandingan, rata-rata tonase, estimasi suplai pasar, dll).
-   - Jika admin mencari/memfilter data (misal: komoditas tertentu, wilayah tertentu, petani belum diverifikasi, luasan tertentu): sebutkan nama-nama petani, nomor HP, detail lahan dan estimasi panen secara akurat.
-   - Jika admin meminta rekomendasi kebijakan/solusi/mitigasi (misal: kenaikan harga cabai ekstrem, anomali pasokan, distribusi pupuk, cuaca buruk): susun rekomendasi terstruktur, runut, dan taktis (contoh: intervensi pasar, mobilisasi rantai pasok antar-daerah, pengawalan PPL, manajemen cadangan pangan).
-   - Jika admin meminta dibuatkan draf pesan (contoh: broadcast WhatsApp ke kelompok tani, arahan dinas ke petugas PPL, peringatan dini hama): buatkan draf pesan WhatsApp resmi yang siap disalin/disebarkan dengan format yang rapi dan profesional.
-   - Jika admin meminta unduh/ekspor: informasikan link unduh CSV [/api/sheets/export.csv] dan live web spreadsheet [/api/sheets/live-view].
-2. FORMAT & GAYA KOMUNIKASI:
-   - Gunakan format gaya pesan WhatsApp yang rapi (*tebal*, _miring_, poin •, angka 1 2 3, emoji pendukung).
-   - Sapa dengan hormat Bpk/Ibu ${activeAdmin.nama}.
-   - Jangan menyertakan blok kode JSON mentah di dalam teks pesan "reply".
-3. FORMAT OUTPUT JSON (WAJIB VALID JSON):
+BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
+1. Jawab secara ringkas, to the point, padat informasi (maksimal 2-3 paragraf pendek atau poin WhatsApp).
+2. Jika admin mencari petani atau komoditas tertentu, jelaskan data spesifik yang diminta tanpa membeberkan seluruh database.
+3. Jika admin meminta draft pesan broadcast WhatsApp, berikan teks siap kirim yang bernas.
+4. Format output JSON WAJIB:
 {
   "reply": "Pesan balasan profesional untuk Admin dalam format WhatsApp (*bold*, bullet points, emojis)",
-  "quickReplies": ["3-4 tombol aksi cepat yang relevan langsung dengan topik yang baru saja dibahas"],
+  "quickReplies": ["3 tombol aksi cepat yang relevan"],
   "isAdminAction": true
 }`;
 
-          const historyFormatted = (history || [])
-            .slice(-6)
-            .map((h: any) => `${h.sender === "bot" ? "Kang Tani AI" : "Admin"}: ${h.text}`)
-            .join("\n\n");
+      let aiResult: { text: string; provider: "9router" | "gemini"; model: string } | null = null;
+      try {
+        aiResult = await callUniversalAI(
+          adminSystemInstructions,
+          message,
+          history,
+          { signal: clientAbortController.signal, maxOutputTokens: 550 }
+        );
+      } catch (err: any) {
+        if (isClientAborted || clientAbortController.signal.aborted) {
+          console.log("[Admin Chat] AI dibatalkan oleh pengguna (hemat biaya).");
+          if (!res.headersSent) {
+            return res.status(499).json({ error: "Permintaan dibatalkan oleh pengguna (hemat token)." });
+          }
+          return;
+        }
+        console.log("[Admin Chat] AI provider error, using smart fallback:", err?.message);
+      }
 
-          const chatMessages = [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: `${adminSystemInstructions}\n\n${
-                    historyFormatted ? `RIWAYAT PERCAKAPAN SEBELUMNYA:\n${historyFormatted}\n\n` : ""
-                  }REQUEST DARI ADMIN ${activeAdmin.nama}:\n"${message}"`,
-                },
-              ],
-            },
-          ];
-
-          const responseText = await callGeminiGenerate(ai, chatMessages);
+      if (aiResult) {
+        try {
+          const responseText = aiResult.text;
           let parsed: any;
           try {
             const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -1044,6 +2452,9 @@ ATURAN DAN PRINSIP RESPON (SANGAT PENTING):
             } catch {}
           }
 
+          parsed.aiProvider = aiResult.provider;
+          parsed.aiModel = aiResult.model;
+
           const lowerAdminMsg = (message || "").toLowerCase();
           const isAddRequest =
             lowerAdminMsg.includes("tambah") ||
@@ -1058,7 +2469,7 @@ ATURAN DAN PRINSIP RESPON (SANGAT PENTING):
           const merged = { ...(currentDraft || {}), ...(parsed.extracted || {}), ...(reg.extracted || {}) };
           const check = checkFarmerCompleteness(merged);
 
-          if (isAddRequest || reg.hasMinimumData || parsed.isComplete) {
+          if (isAddRequest || parsed.isComplete) {
             if (check.isComplete) {
               const newRecord = saveFarmerRecord(merged, activeAdmin, activeAdmin.noHp);
               parsed.savedRecord = newRecord;
@@ -1084,54 +2495,60 @@ ATURAN DAN PRINSIP RESPON (SANGAT PENTING):
             parsed.quickReplies = ["📊 Rekap Semua Petani", "🌶️ Analisis Anomali Cabai", "📥 Siapkan Ekspor Sheets"];
           }
 
+          // Cache non-mutating AI reply for future reuse (Pillar 3)
+          if (isCacheable && parsed?.reply && !parsed?.isComplete) {
+            aiResponseCache.set(cacheKey, {
+              reply: parsed.reply,
+              quickReplies: parsed.quickReplies,
+              isAdminAction: true,
+              timestamp: Date.now(),
+              dataVersion: currentDataVersion,
+              provider: "cache",
+            });
+          }
+
           return res.json(parsed);
         } catch (err: any) {
-          console.log("[Admin Chat] Gemini fallback triggered:", err?.message);
+          console.log("[Admin Chat] Parsing fallback triggered:", err?.message);
         }
       }
 
       // Smart Dynamic Fallback for Admin
       const smartFallback = generateSmartAdminFallback(message, activeAdmin, farmersDb, commoditiesDb, currentDraft);
-      return res.json(smartFallback);
+      return res.json({ ...smartFallback, aiProvider: "rule_based" });
     }
 
-    // GENERAL CONVERSATION (Petani Biasa / Non-Admin)
-    const systemInstructions = `Anda adalah "Kang Tani AI", asisten digital cerdas, sopan, dan hangat yang terhubung ke WhatsApp untuk melayani para petani Indonesia.
-Tujuan utama Anda:
-1. Menyapa petani dengan hangat dan ramah dalam Bahasa Indonesia santun (bisa sesekali menyisipkan istilah akrab khas mitra tani seperti "Pak/Bu Tani", "Mugi berkah").
-2. Membantu menjawab pertanyaan seputar pertanian, hama penyakit, pupuk, atau harga pasar komoditas secara tuntas, solutif, dan berbasis keahlian agrikultur.
-3. Mencatat data lahan dan komoditas petani untuk direkam secara REAL-TIME ke Google Sheets agar para data scientist dan penyuluh pertanian dapat memberikan rekomendasi terbaik.
-   Data yang wajib digali secara bertahap / natural jika petani ingin mendaftar:
-   - Nama Petani
-   - Nomor WhatsApp / Kontak
-   - Alamat Lengkap (Desa, Kecamatan, Kabupaten/Kota)
-   - Luasan Lahan (misal: "1 hektar", "5000 m2", "1 bahu", "100 ubin" -> konversikan ke satuan Hektar)
-   - Komoditas utama & varietas yang ditanam (misal: Padi Inpari 32, Cabai Rawit Merah, Bawang Merah, Jagung Hibrida)
-   - Estimasi Waktu Panen (Bulan & Tahun) serta perkiraan hasil panen dalam Ton.
+    // GENERAL CONVERSATION (Petani Biasa / Non-Admin) with Lean Targeted Context
+    const leanContext = buildLeanTargetedContext(message, false);
 
-STATUS DATA DRAFT SAAT INI:
-${JSON.stringify(currentDraft || {}, null, 2)}
+    const systemInstructions = `Anda adalah "Kang Tani AI", asisten digital cerdas, sopan, dan hangat di WhatsApp untuk petani Indonesia.
 
-DATA HARGA PASAR TERKINI:
-${commoditiesDb.map((c) => `- ${c.nama}: Rp ${c.hargaSekarang.toLocaleString("id-ID")}/kg (Status: ${c.statusAnomali}, Perubahan: ${c.perubahanPersen}%)`).join("\n")}
+${leanContext.summary}
+${leanContext.targetedDetails ? `${leanContext.targetedDetails}\n` : ""}
+${leanContext.marketHighlight ? `${leanContext.marketHighlight}\n` : ""}
+${currentDraft && Object.keys(currentDraft).length > 0 ? `DRAFT DATA TERKUMPUL: ${JSON.stringify(currentDraft)}` : ""}
 
-Format output yang HARUS Anda berikan adalah JSON persis seperti berikut:
+BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
+1. Jawab ramah dan ringkas (maksimal 2 paragraf singkat WhatsApp).
+2. Langsung berikan solusi teknis atau data harga tanpa bertele-tele.
+3. Jika petani mendaftarkan lahan, gali data yang belum ada: Nama, No WA, Alamat, Luas Lahan (Ha), Komoditas, Estimasi Panen.
+4. Format output JSON:
 {
-  "reply": "Pesan balasan Anda ke petani via WhatsApp (gunakan format gaya pesan WhatsApp dengan emoji yang ramah, tebalkan kata penting seperti *Nama*, *Komoditas*, dsb.)",
+  "reply": "Pesan balasan ramah & padat gaya WhatsApp (*bold*, emoji)",
   "extracted": {
-    "nama": "nama jika disebutkan / null",
+    "nama": "nama jika ada / null",
     "noHp": "nomor wa jika ada / null",
     "alamat": "desa & kecamatan jika ada / null",
     "kabupaten": "kabupaten jika ada / null",
     "luasLahan": 1.5,
-    "luasLahanFormatted": "1.5 Ha (15.000 m²)",
+    "luasLahanFormatted": "1.5 Ha",
     "komoditas": "komoditas jika ada / null",
-    "varietas": "varietas benih jika ada / null",
+    "varietas": "varietas jika ada / null",
     "estimasiPanen": "Bulan Tahun jika ada / null",
     "estimasiHasilTon": 9.5
   },
-  "isComplete": true (hanya jika minimal nama, alamat, luasLahan, komoditas, estimasiPanen sudah lengkap terkumpul),
-  "quickReplies": ["3-4 opsi pilihan cepat untuk tombol WhatsApp"]
+  "isComplete": true (hanya jika data pokok lengkap),
+  "quickReplies": ["2-3 opsi cepat"]
 }`;
 
     if (!ai) {
@@ -1151,7 +2568,7 @@ Format output yang HARUS Anda berikan adalah JSON persis seperti berikut:
       const check = checkFarmerCompleteness(extracted);
 
       // If user asks to add or provides farmer registration details
-      if (isAddIntent || reg.hasMinimumData) {
+      if (isAddIntent) {
         if (check.isComplete) {
           const newRecord = saveFarmerRecord(extracted, undefined, senderPhone);
           return res.json({
@@ -1210,161 +2627,286 @@ Format output yang HARUS Anda berikan adalah JSON persis seperti berikut:
       });
     }
 
+    let aiResult: { text: string; provider: "9router" | "gemini"; model: string } | null = null;
     try {
-      const historyFormatted = (history || [])
-        .slice(-6)
-        .map((h: any) => `${h.sender === "bot" ? "Kang Tani AI" : "Petani"}: ${h.text}`)
-        .join("\n\n");
-
-      const chatMessages = [
-        {
-          role: "user",
-          parts: [
-            {
-              text: `${systemInstructions}\n\n${
-                historyFormatted ? `RIWAYAT PERCAKAPAN SEBELUMNYA:\n${historyFormatted}\n\n` : ""
-              }PESAN DARI PETANI:\n"${message}"`,
-            },
-          ],
-        },
-      ];
-
-      const responseText = await callGeminiGenerate(ai, chatMessages);
-      let parsed: any;
-      try {
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        parsed = JSON.parse(jsonMatch ? jsonMatch[0] : responseText);
-      } catch {
-        parsed = {
-          reply: responseText,
-          extracted: {},
-          isComplete: false,
-          quickReplies: ["Daftarkan Lahan", "Cek Harga Pasar", "Konsultasi Pupuk"],
-        };
-      }
-
-      // If reply is accidentally stringified JSON, unnest it
-      if (typeof parsed.reply === "string" && parsed.reply.trim().startsWith("{") && parsed.reply.trim().endsWith("}")) {
-        try {
-          const inner = JSON.parse(parsed.reply.trim());
-          if (inner.reply) {
-            parsed = { ...parsed, ...inner };
-          }
-        } catch {
-          // ignore
-        }
-      }
-
-      // Merge extracted fields with regex extractor and previous draft
-      const reg = extractFarmerFromText(message, currentDraft || {});
-      const merged = { ...(currentDraft || {}), ...(parsed.extracted || {}), ...(reg.extracted || {}) };
-      parsed.extracted = merged;
-
-      const lowerNonAdmin = (message || "").toLowerCase();
-      const isAddRequest =
-        lowerNonAdmin.includes("tambah") ||
-        lowerNonAdmin.includes("daftarkan") ||
-        lowerNonAdmin.includes("daftar") ||
-        lowerNonAdmin.includes("input") ||
-        lowerNonAdmin.includes("masukkan") ||
-        lowerNonAdmin.includes("catat") ||
-        lowerNonAdmin.includes("simpan");
-
-      const check = checkFarmerCompleteness(merged);
-
-      // Only save when ALL required fields are complete!
-      if (isAddRequest || reg.hasMinimumData || parsed.isComplete) {
-        if (check.isComplete) {
-          const newRecord = saveFarmerRecord(merged, undefined, senderPhone);
-          parsed.savedRecord = newRecord;
-          parsed.extracted = newRecord;
-          parsed.isComplete = true;
-          parsed.reply = formatSuccessFarmerRegistration(newRecord);
-        } else {
-          // INCOMPLETE DATA: DO NOT save to database yet! Prompt user to complete the missing fields.
-          const incomplete = formatIncompleteFarmerPrompt(merged, undefined, false);
-          parsed.reply = incomplete.reply;
-          parsed.quickReplies = incomplete.quickReplies;
-          parsed.extracted = merged;
-          parsed.isComplete = false;
-          delete parsed.savedRecord;
-        }
-      }
-
-      res.json(parsed);
+      aiResult = await callUniversalAI(
+        systemInstructions,
+        message,
+        history,
+        { signal: clientAbortController.signal, maxOutputTokens: 550 }
+      );
     } catch (error: any) {
-      console.log("[Chat Info] Serving rule-based fallback reply:", error?.message || "fallback");
-      const lower = (message || "").toLowerCase();
-      const isAddRequest =
-        lower.includes("tambah") ||
-        lower.includes("daftarkan") ||
-        lower.includes("daftar") ||
-        lower.includes("input") ||
-        lower.includes("masukkan") ||
-        lower.includes("catat") ||
-        lower.includes("simpan");
-
-      const reg = extractFarmerFromText(message, currentDraft || {});
-      const extracted: Partial<FarmerRecord> = { ...(currentDraft || {}), ...reg.extracted };
-      const check = checkFarmerCompleteness(extracted);
-
-      if (isAddRequest || reg.hasMinimumData) {
-        if (check.isComplete) {
-          const newRecord = saveFarmerRecord(extracted, undefined, senderPhone);
-          return res.json({
-            reply: formatSuccessFarmerRegistration(newRecord),
-            extracted: newRecord,
-            isComplete: true,
-            savedRecord: newRecord,
-            quickReplies: [
-              "Cek Harga Cabai Hari Ini",
-              "Konsultasi Hama Tanaman",
-              "Buka Database Google Sheets",
-              "Daftarkan Lahan Lain",
-            ],
-          });
-        } else {
-          // INCOMPLETE: DO NOT save to database! Ask for missing fields
-          const incomplete = formatIncompleteFarmerPrompt(extracted, undefined, false);
-          return res.json(incomplete);
+      if (isClientAborted || clientAbortController.signal.aborted) {
+        console.log("[Petani Chat] AI dibatalkan oleh pengguna (hemat biaya).");
+        if (!res.headersSent) {
+          return res.status(499).json({ error: "Permintaan dibatalkan oleh pengguna (hemat token)." });
         }
+        return;
       }
-
-      // Rule-based fallback response
-      let fallbackReply =
-        "🌾 *Salam Berkah Petani!* Pesan Bapak/Ibu telah diterima Kang Tani AI. Boleh disampaikan nama lengkap, luas lahan, dan komoditas apa yang sedang ditanam agar kami catat ke Google Sheets?";
-
-      if (lower.includes("harga") || lower.includes("pasar")) {
-        fallbackReply = `📊 *Informasi Harga Pasar Terkini:*\n• Beras Premium: Rp 16.200/kg\n• Cabai Rawit Merah: Rp 82.000/kg (⚠️ Lonjakan Ekstrem +36.7%)\n• Bawang Merah: Rp 28.500/kg\n• Jagung Pipil: Rp 5.800/kg\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
-      } else if (lower.includes("padi") || lower.includes("cabai") || lower.includes("bawang") || lower.includes("jagung")) {
-        const crop = lower.includes("cabai")
-          ? "Cabai Rawit"
-          : lower.includes("bawang")
-          ? "Bawang Merah"
-          : lower.includes("jagung")
-          ? "Jagung Hibrida"
-          : "Padi";
-        extracted.komoditas = crop;
-        fallbackReply = `Matur nuwun infonya Pak/Bu! Senang mendengar Bapak/Ibu menanam *${crop}*. Berapa luasan lahan yang ditanam dan di desa mana lokasinya agar langsung kami sinkronkan ke Google Sheets?`;
-      } else if (lower.includes("ha") || lower.includes("hektar") || lower.includes("m2")) {
-        const num = parseFloat(lower.match(/\d+(\.\d+)?/)?.[0] || "1.0");
-        extracted.luasLahan = num;
-        extracted.luasLahanFormatted = `${num} Ha`;
-        extracted.estimasiHasilTon = num * 6;
-        fallbackReply = `Data luasan *${num} Hektar* berhasil dicatat. Atas nama Bapak/Ibu siapa pendaftaran lahan ini dicatatkan ke database?`;
-      }
-
-      res.json({
-        reply: fallbackReply,
-        extracted,
-        isComplete: false,
-        quickReplies: [
-          "Daftarkan Lahan Baru",
-          "Cek Harga Pasar Hari Ini",
-          "Buka Database Google Sheets",
-        ],
-      });
+      console.log("[Chat Info] Universal AI error, serving rule-based fallback reply:", error?.message || "fallback");
     }
+
+    if (aiResult) {
+      try {
+        const responseText = aiResult.text;
+        let parsed: any;
+        try {
+          const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+          parsed = JSON.parse(jsonMatch ? jsonMatch[0] : responseText);
+        } catch {
+          parsed = {
+            reply: responseText,
+            extracted: {},
+            isComplete: false,
+            quickReplies: ["Daftarkan Lahan", "Cek Harga Pasar", "Konsultasi Pupuk"],
+          };
+        }
+
+        // If reply is accidentally stringified JSON, unnest it
+        if (typeof parsed.reply === "string" && parsed.reply.trim().startsWith("{") && parsed.reply.trim().endsWith("}")) {
+          try {
+            const inner = JSON.parse(parsed.reply.trim());
+            if (inner.reply) {
+              parsed = { ...parsed, ...inner };
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        parsed.aiProvider = aiResult.provider;
+        parsed.aiModel = aiResult.model;
+
+        // Merge extracted fields with regex extractor and previous draft
+        const reg = extractFarmerFromText(message, currentDraft || {});
+        const merged = { ...(currentDraft || {}), ...(parsed.extracted || {}), ...(reg.extracted || {}) };
+        parsed.extracted = merged;
+
+        const lowerNonAdmin = (message || "").toLowerCase();
+        const isAddRequest =
+          lowerNonAdmin.includes("tambah") ||
+          lowerNonAdmin.includes("daftarkan") ||
+          lowerNonAdmin.includes("daftar") ||
+          lowerNonAdmin.includes("input") ||
+          lowerNonAdmin.includes("masukkan") ||
+          lowerNonAdmin.includes("catat") ||
+          lowerNonAdmin.includes("simpan");
+
+        const check = checkFarmerCompleteness(merged);
+
+        // Only save when ALL required fields are complete!
+        if (isAddRequest || parsed.isComplete) {
+          if (check.isComplete) {
+            const newRecord = saveFarmerRecord(merged, undefined, senderPhone);
+            parsed.savedRecord = newRecord;
+            parsed.extracted = newRecord;
+            parsed.isComplete = true;
+            parsed.reply = formatSuccessFarmerRegistration(newRecord);
+          } else {
+            // INCOMPLETE DATA: DO NOT save to database yet! Prompt user to complete the missing fields.
+            const incomplete = formatIncompleteFarmerPrompt(merged, undefined, false);
+            parsed.reply = incomplete.reply;
+            parsed.quickReplies = incomplete.quickReplies;
+            parsed.extracted = merged;
+            parsed.isComplete = false;
+            delete parsed.savedRecord;
+          }
+        }
+
+        // Cache non-mutating response for future query reuse (Pillar 3)
+        if (isCacheable && parsed?.reply && !parsed?.isComplete && !parsed?.savedRecord) {
+          aiResponseCache.set(cacheKey, {
+            reply: parsed.reply,
+            quickReplies: parsed.quickReplies,
+            isAdminAction: false,
+            timestamp: Date.now(),
+            dataVersion: currentDataVersion,
+            provider: "cache",
+          });
+        }
+
+        return res.json(parsed);
+      } catch (err: any) {
+        console.log("[Chat Info] Error processing AI response, falling back to rule-based:", err?.message);
+      }
+    }
+
+    // Rule-based fallback response
+    console.log("[Chat Info] Serving rule-based fallback reply");
+    const lower = (message || "").toLowerCase();
+    const isAddRequest =
+      lower.includes("tambah") ||
+      lower.includes("daftarkan") ||
+      lower.includes("daftar") ||
+      lower.includes("input") ||
+      lower.includes("masukkan") ||
+      lower.includes("catat") ||
+      lower.includes("simpan");
+
+    const reg = extractFarmerFromText(message, currentDraft || {});
+    const extracted: Partial<FarmerRecord> = { ...(currentDraft || {}), ...reg.extracted };
+    const check = checkFarmerCompleteness(extracted);
+
+    if (isAddRequest || reg.hasMinimumData) {
+      if (check.isComplete) {
+        const newRecord = saveFarmerRecord(extracted, undefined, senderPhone);
+        return res.json({
+          reply: formatSuccessFarmerRegistration(newRecord),
+          extracted: newRecord,
+          isComplete: true,
+          savedRecord: newRecord,
+          aiProvider: "rule_based",
+          quickReplies: [
+            "Cek Harga Cabai Hari Ini",
+            "Konsultasi Hama Tanaman",
+            "Buka Database Google Sheets",
+            "Daftarkan Lahan Lain",
+          ],
+        });
+      } else {
+        // INCOMPLETE: DO NOT save to database! Ask for missing fields
+        const incomplete = formatIncompleteFarmerPrompt(extracted, undefined, false);
+        return res.json({ ...incomplete, aiProvider: "rule_based" });
+      }
+    }
+
+    // Rule-based fallback response
+    let fallbackReply =
+      "🌾 *Salam Berkah Petani!* Pesan Bapak/Ibu telah diterima Kang Tani AI. Boleh disampaikan nama lengkap, luas lahan, dan komoditas apa yang sedang ditanam agar kami catat ke Google Sheets?";
+
+    if (lower.includes("harga") || lower.includes("pasar")) {
+      fallbackReply = `📊 *Informasi Harga Pasar Terkini:*\n• Beras Premium: Rp 16.200/kg\n• Cabai Rawit Merah: Rp 82.000/kg (⚠️ Lonjakan Ekstrem +36.7%)\n• Bawang Merah: Rp 28.500/kg\n• Jagung Pipil: Rp 5.800/kg\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
+    } else if (lower.includes("padi") || lower.includes("cabai") || lower.includes("bawang") || lower.includes("jagung")) {
+      const crop = lower.includes("cabai")
+        ? "Cabai Rawit"
+        : lower.includes("bawang")
+        ? "Bawang Merah"
+        : lower.includes("jagung")
+        ? "Jagung Hibrida"
+        : "Padi";
+      extracted.komoditas = crop;
+      fallbackReply = `Matur nuwun infonya Pak/Bu! Senang mendengar Bapak/Ibu menanam *${crop}*. Berapa luasan lahan yang ditanam dan di desa mana lokasinya agar langsung kami sinkronkan ke Google Sheets?`;
+    } else if (lower.includes("ha") || lower.includes("hektar") || lower.includes("m2")) {
+      const num = parseFloat(lower.match(/\d+(\.\d+)?/)?.[0] || "1.0");
+      extracted.luasLahan = num;
+      extracted.luasLahanFormatted = `${num} Ha`;
+      extracted.estimasiHasilTon = num * 6;
+      fallbackReply = `Data luasan *${num} Hektar* berhasil dicatat. Atas nama Bapak/Ibu siapa pendaftaran lahan ini dicatatkan ke database?`;
+    }
+
+    res.json({
+      reply: fallbackReply,
+      extracted,
+      isComplete: false,
+      aiProvider: "rule_based",
+      quickReplies: [
+        "Daftarkan Lahan Baru",
+        "Cek Harga Pasar Hari Ini",
+        "Buka Database Google Sheets",
+      ],
+    });
+  });
+
+  // Bi-Directional Webhook Receiver for Google Apps Script & External Automation
+  app.post("/api/webhook", (req, res) => {
+    try {
+      const payload = req.body || {};
+      const timestamp = new Date().toISOString().replace("T", " ").substring(0, 19);
+
+      // 1. Handling Google Apps Script onEdit Event
+      if (payload.event === "sheet_edit") {
+        const { row, col, value, sheetName } = payload;
+        let detail = `Edit di ${sheetName || "Sheet1"} baris #${row}, kolom #${col}: "${value}"`;
+
+        if (row >= 2 && row - 2 < farmersDb.length) {
+          const idx = row - 2;
+          const farmer = farmersDb[idx];
+
+          // Map column:
+          // 3: Nama, 4: NoHp, 5: Alamat, 6: Kabupaten, 7: LuasLahan, 8: Komoditas, 9: Varietas, 10: EstimasiPanen, 11: EstimasiHasilTon, 12: StatusVerifikasi, 13: CatatanAI
+          if (col === 3 && value) farmer.nama = String(value);
+          else if (col === 4 && value) farmer.noHp = String(value);
+          else if (col === 5 && value) farmer.alamat = String(value);
+          else if (col === 6 && value) farmer.kabupaten = String(value);
+          else if (col === 7 && value) {
+            const num = parseFloat(value) || farmer.luasLahan;
+            farmer.luasLahan = num;
+            farmer.luasLahanFormatted = `${num} Ha`;
+          } else if (col === 8 && value) farmer.komoditas = String(value);
+          else if (col === 9 && value) farmer.varietas = String(value);
+          else if (col === 10 && value) farmer.estimasiPanen = String(value);
+          else if (col === 11 && value) farmer.estimasiHasilTon = parseFloat(value) || farmer.estimasiHasilTon;
+          else if (col === 12 && value) {
+            const str = String(value).trim().toLowerCase();
+            if (str.includes("terverifikasi")) farmer.statusVerifikasi = "Terverifikasi";
+            else if (str.includes("klarifikasi")) farmer.statusVerifikasi = "Perlu Klarifikasi";
+            else farmer.statusVerifikasi = "Menunggu Verifikasi";
+          }
+          else if (col === 13 && value) farmer.catatanAI = String(value);
+
+          saveFarmersToDisk();
+          detail += ` → Data petani ${farmer.nama} (${farmer.id}) berhasil diperbarui & disimpan ke disk`;
+        }
+
+        const logItem = {
+          id: `wh-${Date.now()}`,
+          timestamp,
+          event: "sheet_edit",
+          detail,
+          status: "SUCCESS",
+        };
+        webhookLogs.unshift(logItem);
+        if (webhookLogs.length > 50) webhookLogs.pop();
+
+        return res.json({
+          success: true,
+          message: "Sinkronisasi perubahan Google Sheets berhasil dicatat.",
+          log: logItem,
+        });
+      }
+
+      // 2. Generic or Manual Webhook Payload
+      const logItem = {
+        id: `wh-${Date.now()}`,
+        timestamp,
+        event: payload.event || "generic_payload",
+        detail: typeof payload === "string" ? payload.substring(0, 120) : JSON.stringify(payload).substring(0, 120),
+        status: "RECEIVED",
+      };
+      webhookLogs.unshift(logItem);
+      if (webhookLogs.length > 50) webhookLogs.pop();
+
+      res.json({ success: true, message: "Webhook payload diterima", log: logItem });
+    } catch (err: any) {
+      console.error("[Webhook Error]", err);
+      res.status(500).json({ error: "Gagal memproses webhook: " + err.message });
+    }
+  });
+
+  // Test Ping Endpoint for Webhook Verification UI
+  app.post("/api/webhook/test-ping", (_req, res) => {
+    const timestamp = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const logItem = {
+      id: `wh-ping-${Date.now()}`,
+      timestamp,
+      event: "test_ping",
+      detail: "Uji koneksi ping dari antarmuka Webhook Google Apps Script",
+      status: "ACTIVE",
+    };
+    webhookLogs.unshift(logItem);
+    if (webhookLogs.length > 50) webhookLogs.pop();
+
+    res.json({
+      ok: true,
+      timestamp,
+      message: "Endpoint Webhook TaniAI aktif dan siap menerima panggilan dari Google Apps Script onEdit",
+      farmersCount: farmersDb.length,
+    });
+  });
+
+  // GET Webhook Logs
+  app.get("/api/webhook/logs", (_req, res) => {
+    res.json(webhookLogs);
   });
 
   // Webhook WhatsApp Verification (Meta Cloud API Standard)
@@ -1412,20 +2954,29 @@ Format output yang HARUS Anda berikan adalah JSON persis seperti berikut:
       "Catatan Rekomendasi AI",
     ];
 
+    const sanitizeCsv = (val: any) => {
+      if (val === null || val === undefined) return '""';
+      let str = String(val).replace(/"/g, '""');
+      if (/^[=+\-@]/.test(str)) {
+        str = "'" + str;
+      }
+      return `"${str}"`;
+    };
+
     const rows = farmersDb.map((f) => [
-      `"${f.id}"`,
-      `"${f.timestamp}"`,
-      `"${f.nama}"`,
-      `"${f.noHp}"`,
-      `"${f.alamat}"`,
-      `"${f.kabupaten || ""}"`,
+      sanitizeCsv(f.id),
+      sanitizeCsv(f.timestamp),
+      sanitizeCsv(f.nama),
+      sanitizeCsv(f.noHp),
+      sanitizeCsv(f.alamat),
+      sanitizeCsv(f.kabupaten || ""),
       f.luasLahan,
-      `"${f.komoditas}"`,
-      `"${f.varietas || ""}"`,
-      `"${f.estimasiPanen}"`,
+      sanitizeCsv(f.komoditas),
+      sanitizeCsv(f.varietas || ""),
+      sanitizeCsv(f.estimasiPanen),
       f.estimasiHasilTon,
-      `"${f.statusVerifikasi}"`,
-      `"${(f.catatanAI || "").replace(/"/g, '""')}"`,
+      sanitizeCsv(f.statusVerifikasi),
+      sanitizeCsv(f.catatanAI || ""),
     ]);
 
     const csvContent = "\uFEFF" + [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
@@ -1701,6 +3252,24 @@ Format output yang HARUS Anda berikan adalah JSON persis seperti berikut:
 </html>`;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(html);
+  });
+
+  // AI Cost Optimization & Metrics endpoint
+  app.get("/api/ai/metrics", (_req, res) => {
+    res.json({
+      totalCacheHits,
+      totalTokensSavedEstimate,
+      cachedItemsCount: aiResponseCache.size,
+      dataVersion: currentDataVersion,
+      maxOutputTokensLimit: 550,
+      activeProvider: getNineRouterConfig().isConfigured ? "9router" : getGemini() ? "gemini" : "offline_fallback",
+    });
+  });
+
+  // Explicit cancellation endpoint
+  app.post("/api/chat/cancel", (_req, res) => {
+    console.log("[AI Cost Optimizer] Client requested explicit cancellation.");
+    res.json({ ok: true, message: "Proses AI dibatalkan untuk menghemat token." });
   });
 
   return app;

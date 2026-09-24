@@ -36,6 +36,7 @@ export const GoogleSheetsOnlineModal: React.FC<GoogleSheetsOnlineModalProps> = (
   });
   const [copied, setCopied] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -49,8 +50,6 @@ export const GoogleSheetsOnlineModal: React.FC<GoogleSheetsOnlineModalProps> = (
       (f.kabupaten && f.kabupaten.toLowerCase().includes(searchQuery.toLowerCase())) ||
       f.alamat.toLowerCase().includes(searchQuery.toLowerCase())
   );
-
-  const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
 
   const handleCopyTSV = () => {
     const headers = [
